@@ -361,12 +361,10 @@ QTreeWidget#sidebar::item:selected {
     background: $accent_soft;
     color: $accent;
 }
-/* the branch column must be painted explicitly, otherwise Qt draws the
-   selection highlight behind the expand arrow */
-/* The branch strip is painted by the style, not by the item delegate: fill
-   it with the panel colour so a selected row stays a single pill. */
-QTreeWidget#sidebar::branch { background: $sidebar; border: none; }
-QTreeWidget#sidebar::branch:selected { background: $sidebar; }
+/* The strip left of the items (expand arrows) is painted by SidebarTree:
+   the style must not draw its own selection panel there. */
+QTreeWidget#sidebar::branch { background: transparent; border: none; }
+QTreeWidget#sidebar::branch:selected { background: transparent; }
 QTreeWidget#sidebar::item:selected:!active {
     background: $accent_soft;
     color: $text;

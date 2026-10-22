@@ -310,10 +310,13 @@ class DashboardPage(ScrollPage):
         cards.setSpacing(12)
         has_data = stats["subjects"] > 0
         palette = self.main.theme_palette()
+        courses = int(stats["courses"] or 0)
+        homeworks = int(stats["subjects"] or 0)
+        tests = int(stats["total"] or 0)
         for caption, value, icon_name in (
-            ("предметов", fmt_int(stats["courses"]), "book"),
-            ("домашек", fmt_int(stats["subjects"]), "homework"),
-            ("тестов", fmt_int(stats["total"]), "layers"),
+            (plural(courses, "предмет", "предмета", "предметов"), fmt_int(courses), "book"),
+            (plural(homeworks, "домашка", "домашки", "домашек"), fmt_int(homeworks), "homework"),
+            (plural(tests, "тест", "теста", "тестов"), fmt_int(tests), "layers"),
             ("с готовым ответом", fmt_int(stats["supported"]), "check"),
             ("обновлено", relative_time(stats["updated_at"]), "clock"),
         ):

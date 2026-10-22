@@ -162,6 +162,9 @@ class SyncThread(QThread):
             if result.error and str(result.error).startswith("auth"):
                 # Session expired: stop the whole queue instead of hammering.
                 break
+        # Persist any name that could only be read from a payload («Предмет
+        # #111137» → «История России»), so the next launch shows it too.
+        db.repair_course_titles()
         self.finished_all.emit(results)
 
     # ------------------------------------------------------------------ #

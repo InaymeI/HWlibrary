@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from . import config
-from .models import looks_like_id
+from .models import find_course_title, looks_like_id, subject_title
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS subjects (
@@ -169,6 +169,8 @@ def init() -> None:
         _migrate_v1(conn)
     if version < 2:
         _migrate_v2(conn)
+    if version < 4:
+        _migrate_v4()
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -226,6 +228,16 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         conn.executemany("UPDATE subjects SET title = ? WHERE id = ?", subject_updates)
 
 
+def _migrate_v4() -> None:
+    """Replace cached id-like предмет names with the real ones (one-off).
+
+    Older builds stored «Предмет #111137» (or a bare id) because they never
+    looked at ``courseTitleForModule``.  The payloads are already in the cache,
+    so the names can be repaired without another sync.
+    """
+    repair_course_titles()
+
+
 # --------------------------------------------------------------------------- #
 # subjects
 # --------------------------------------------------------------------------- #
@@ -252,7 +264,20 @@ def list_subjects() -> list[dict[str, Any]]:
 
 def get_subject(sid: int) -> dict[str, Any] | None:
     row = get_connection().execute("SELECT * FROM subjects WHERE id = ?", (sid,)).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    subject = dict(row)
+    if title_is_generic(subject.get("title")):
+        real = subject_title_from_cache(int(sid))
+        if real:
+            subject["title"] = real
+    return subject
+
+
+def rename_subject(sid: int, title: str) -> None:
+    """Store a name the user typed by hand (overrides the automatic one)."""
+    with transaction() as conn:
+        conn.execute("UPDATE subjects SET title = ? WHERE id = ?", (title, sid))
 
 
 # --------------------------------------------------------------------------- #
@@ -332,7 +357,14 @@ def upsert_course(cid: int, title: str, payload: dict[str, Any]) -> None:
 
 def get_course(cid: int) -> dict[str, Any] | None:
     row = get_connection().execute("SELECT * FROM courses WHERE id = ?", (cid,)).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    course = dict(row)
+    if title_is_generic(course.get("title")):
+        real = course_title_from_cache(int(cid))
+        if real:
+            course["title"] = real
+    return course
 
 
 def _course_stat_rows() -> list[dict[str, Any]]:
@@ -371,6 +403,12 @@ def _course_stat_rows() -> list[dict[str, Any]]:
     result = []
     for row in rows:
         item = dict(row)
+        if title_is_generic(item.get("title")):
+            # Old caches may still hold «Предмет #111137»: read the name from
+            # the payloads that are already on disk.
+            real = course_title_from_cache(int(item["id"]))
+            if real:
+                item["title"] = real
         item["lesson_count"] = item.get("lesson_count") or 0
         item["homework_count"] = item.get("homework_count") or 0
         item["section_count"] = item.get("section_count") or 0
@@ -386,11 +424,94 @@ def rename_course(cid: int, title: str) -> None:
 
 
 def title_is_generic(title: str | None) -> bool:
-    """True for «Предмет #111137», «Домашка #777» or a bare id like ``111137``."""
-    text = str(title or "").strip()
-    if not text or text.startswith(("Предмет #", "Курс #", "Домашка #", "Урок #")):
-        return True
-    return looks_like_id(text)
+    """True for «Предмет #111137», «#111130» or a bare id like ``111137``.
+
+    «Домашка №1» is a real name from the site and is *not* generic.
+    """
+    return looks_like_id(str(title or ""))
+
+
+def _load_json(raw: Any) -> Any:
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+
+def subject_title_from_cache(subject_id: int) -> str:
+    """The домашка name recoverable from its cached payload."""
+    row = get_connection().execute(
+        "SELECT payload_json FROM subjects WHERE id = ?", (subject_id,)
+    ).fetchone()
+    if not row:
+        return ""
+    payload = _load_json(row["payload_json"])
+    title = subject_title(payload, "") if isinstance(payload, dict) else ""
+    return "" if title_is_generic(title) else title
+
+
+def course_title_from_cache(cid: int) -> str:
+    """The предмет name recoverable from payloads already in the cache.
+
+    Looks at the course payload, then the lessons of the course (their items
+    carry ``courseTitleForModule``), then the homeworks of the course.  Used to
+    repair old caches without a network round-trip.
+    """
+    conn = get_connection()
+    row = conn.execute("SELECT payload_json FROM courses WHERE id = ?", (cid,)).fetchone()
+    if row:
+        title = find_course_title(_load_json(row["payload_json"]))
+        if title:
+            return title
+    for lesson in conn.execute(
+        "SELECT payload_json FROM lessons WHERE course_id = ?", (cid,)
+    ).fetchall():
+        title = find_course_title(_load_json(lesson["payload_json"]))
+        if title:
+            return title
+    for subject in conn.execute(
+        """
+        SELECT s.payload_json AS payload_json FROM subjects s
+        WHERE s.id IN (
+            SELECT ls.subject_id FROM lessons l
+            JOIN lesson_subjects ls ON ls.lesson_id = l.id
+            WHERE l.course_id = ?
+        )
+        """,
+        (cid,),
+    ).fetchall():
+        title = find_course_title(_load_json(subject["payload_json"]))
+        if title:
+            return title
+    return ""
+
+
+def repair_course_titles() -> int:
+    """Rename every предмет/домашка with an id-like name; returns the count."""
+    conn = get_connection()
+    updates = []
+    for row in conn.execute("SELECT id, title FROM courses").fetchall():
+        if not title_is_generic(row["title"]):
+            continue
+        title = course_title_from_cache(int(row["id"]))
+        if title and not title_is_generic(title):
+            updates.append((title, int(row["id"])))
+    if updates:
+        conn.executemany("UPDATE courses SET title = ? WHERE id = ?", updates)
+    subject_updates = []
+    for row in conn.execute("SELECT id, title FROM subjects").fetchall():
+        if not title_is_generic(row["title"]):
+            continue
+        title = subject_title_from_cache(int(row["id"]))
+        if title and not title_is_generic(title):
+            subject_updates.append((title, int(row["id"])))
+    if subject_updates:
+        conn.executemany("UPDATE subjects SET title = ? WHERE id = ?", subject_updates)
+    if updates or subject_updates:
+        conn.commit()
+    return len(updates) + len(subject_updates)
 
 
 def course_title_is_generic(cid: int) -> bool:
@@ -603,6 +724,10 @@ def _run_homework_select(where: str, args: list[Any]) -> list[dict[str, Any]]:
     rows = []
     for row in get_connection().execute(_homework_select(where), args).fetchall():
         item = dict(row)
+        if title_is_generic(item.get("title")):
+            real = subject_title_from_cache(int(item["id"]))
+            if real:
+                item["title"] = real
         item["sections"] = item.get("sections") or 0
         item["total"] = item.get("total") or 0
         item["supported"] = item.get("supported") or 0
@@ -665,11 +790,16 @@ def homework_row(subject_id: int) -> dict[str, Any] | None:
     counts = subject_stats(subject_id)
     homework = dict(base)
     homework["id"] = int(subject_id)
-    homework["title"] = (
-        (subject or {}).get("title")
-        or base.get("title")
-        or f"Домашка #{subject_id}"
-    )
+    for candidate in (
+        (subject or {}).get("title"),
+        base.get("title"),
+        subject_title_from_cache(int(subject_id)),
+    ):
+        if candidate and not title_is_generic(candidate):
+            homework["title"] = candidate
+            break
+    else:
+        homework["title"] = f"Домашка #{subject_id}"
     homework["sections"] = len(_kbs_rows_with_stats([subject_id]))
     homework["total"] = counts["total"]
     homework["supported"] = counts["supported"]
@@ -711,6 +841,10 @@ def standalone_homeworks() -> list[dict[str, Any]]:
     result = []
     for row in rows:
         item = dict(row)
+        if title_is_generic(item.get("title")):
+            real = subject_title_from_cache(int(item["id"]))
+            if real:
+                item["title"] = real
         item["sections"] = item.get("sections") or 0
         item["total"] = item.get("total") or 0
         item["supported"] = item.get("supported") or 0
@@ -947,9 +1081,14 @@ def _filter_clause(
         pattern = _like_pattern(token)
         where.append(
             "(ulower(t.title) LIKE ? ESCAPE '\\' OR CAST(t.id AS TEXT) LIKE ? ESCAPE '\\'"
-            " OR ulower(t.type) LIKE ? ESCAPE '\\' OR ulower(k.title) LIKE ? ESCAPE '\\')"
+            " OR ulower(t.type) LIKE ? ESCAPE '\\' OR ulower(k.title) LIKE ? ESCAPE '\\'"
+            " OR ulower(s.title) LIKE ? ESCAPE '\\'"
+            " OR t.subject_id IN (SELECT ls.subject_id FROM lessons l"
+            " JOIN lesson_subjects ls ON ls.lesson_id = l.id"
+            " JOIN courses c ON c.id = l.course_id"
+            " WHERE ulower(c.title) LIKE ? ESCAPE '\\'))"
         )
-        args.extend([pattern] * 4)
+        args.extend([pattern] * 6)
     return (" WHERE " + " AND ".join(where)) if where else "", args
 
 
@@ -989,6 +1128,7 @@ def query_tests_count(
     sql = (
         "SELECT COUNT(*) FROM tests t"
         " LEFT JOIN knowledge_bases k ON k.id = t.kbs_id"
+        " LEFT JOIN subjects s ON s.id = t.subject_id"
         + where
     )
     row = get_connection().execute(sql, args).fetchone()

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from PyQt6 import sip
-from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QRect, QSettings, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -82,18 +82,110 @@ COUNT_ROLE = Qt.ItemDataRole.UserRole + 7
 
 
 class SidebarTree(QTreeWidget):
-    """Sidebar tree with whole-row rounded selection.
+    """Sidebar tree with whole-row rounded selection and its own chevrons.
 
-    Qt paints a tree selection cell by cell; with a separate counters column
-    the rounded highlight breaks into three pills, and the style also paints a
-    flat row panel behind the branches.  The selection state is cleared here so
-    only :class:`SidebarDelegate` draws it, once, across the whole row.
+    Qt paints a tree selection cell by cell, and the style paints a flat panel
+    behind the branches; the selection state is cleared here and replaced with
+    one rounded pill drawn across the whole row.  The expand arrows are painted
+    by hand too, so every предмет / урок / домашка collapses on its own when
+    its arrow is clicked, and the state is persisted.
     """
 
-    def drawRow(self, painter: QPainter, option: QStyleOptionViewItem,
-                index) -> None:
+    CHEVRON = 16
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._branch_color = "#8c8c8c"
+        self._hover_color = "#f3f3f3"
+        self._selected_color = "#ececec"
+        self.setMouseTracking(True)
+        self.setExpandsOnDoubleClick(False)
+
+    def set_branch_color(self, color: str) -> None:
+        self._branch_color = color
+        self.viewport().update()
+
+    def set_row_colors(self, hover: str, selected: str) -> None:
+        self._hover_color = hover
+        self._selected_color = selected
+        self.viewport().update()
+
+    def drawRow(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        """One rounded pill for the whole row, arrow included."""
         option.state &= ~QStyle.StateFlag.State_Selected
+        selected = self.currentIndex() == index
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        if selected or hovered:
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(self._selected_color if selected else self._hover_color))
+            pill = QRect(2, option.rect.top() + 2, self.viewport().width() - 8,
+                         option.rect.height() - 4)
+            painter.drawRoundedRect(pill, 9, 9)
+            painter.restore()
         super().drawRow(painter, option, index)
+
+    # ------------------------------------------------------------------ #
+    def has_children(self, index) -> bool:
+        return bool(index.isValid() and self.model().rowCount(index) > 0)
+
+    def _depth(self, index) -> int:
+        depth = 0
+        parent = index.parent()
+        while parent.isValid():
+            depth += 1
+            parent = parent.parent()
+        return depth
+
+    def branch_rect(self, index) -> QRect:
+        """Clickable box of the expand arrow, left of the item text."""
+        row = self.visualRect(index)
+        if not row.isValid():
+            return QRect()
+        size = self.CHEVRON
+        top = row.top() + max(0, (row.height() - size) // 2)
+        return QRect(self._depth(index) * self.indentation() + 1, top, size, size)
+
+    def toggle_index(self, index) -> None:
+        item = self.itemFromIndex(index)
+        if item is not None and item.childCount():
+            item.setExpanded(not item.isExpanded())
+
+    def drawBranches(self, painter: QPainter, rect: QRect, index) -> None:
+        # No style-painted strip and no default arrows: one chevron per parent.
+        if not self.has_children(index):
+            return
+        box = self.branch_rect(index)
+        if not box.isValid():
+            return
+        name = "chevron-down" if self.isExpanded(index) else "chevron-right"
+        pixmap = icons.pixmap(name, self._branch_color, box.width() - 2)
+        painter.drawPixmap(box.x() + 1, box.y() + 1, pixmap)
+
+    # ------------------------------------------------------------------ #
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.button() == Qt.MouseButton.LeftButton:
+            point = event.position().toPoint()
+            index = self.indexAt(point)
+            if self.has_children(index) and self.branch_rect(index).contains(point):
+                self.toggle_index(index)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        point = event.position().toPoint()
+        index = self.indexAt(point)
+        over_arrow = self.has_children(index) and self.branch_rect(index).contains(point)
+        self.viewport().setCursor(
+            Qt.CursorShape.PointingHandCursor if over_arrow else Qt.CursorShape.ArrowCursor
+        )
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        super().leaveEvent(event)
 
 
 class SidebarDelegate(QStyledItemDelegate):
@@ -105,15 +197,11 @@ class SidebarDelegate(QStyledItemDelegate):
         self._text = "#141414"
         self._secondary = "#575757"
         self._muted = "#8c8c8c"
-        self._hover = "#f3f3f3"
-        self._selected = "#ececec"
 
     def set_palette(self, palette: Palette) -> None:
         self._text = palette.text
         self._secondary = palette.text_secondary
         self._muted = palette.muted
-        self._hover = palette.surface_alt
-        self._selected = palette.accent_soft
         self._tree.viewport().update()
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
@@ -122,12 +210,6 @@ class SidebarDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(2, 2, -4, -2)
         current = self._tree.currentIndex()
         selected = bool(current.isValid() and current == index)
-        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-
-        if selected or hovered:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(self._selected if selected else self._hover))
-            painter.drawRoundedRect(rect, 9, 9)
 
         font = index.data(Qt.ItemDataRole.FontRole) or option.font
         if not isinstance(font, QFont):
@@ -225,7 +307,8 @@ class Sidebar(QWidget):
         self.section_label.setText("ПРЕДМЕТЫ")
         self.section_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.section_label.setToolTip(
-            "Свернуть или развернуть список предметов (Ctrl+B)"
+            "Скрыть или показать весь список (Ctrl+B). "
+            "Каждый предмет сворачивается стрелкой слева."
         )
         ICONS.bind(self.section_label, "chevron-down", "text_secondary", 14)
         self.section_label.clicked.connect(lambda: self.toggle_section())
@@ -243,7 +326,7 @@ class Sidebar(QWidget):
         self.tree.setItemDelegate(SidebarDelegate(self.tree))
         self.tree.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.tree.setMouseTracking(True)
-        self.tree.setIndentation(12)
+        self.tree.setIndentation(SidebarTree.CHEVRON + 2)
         self.tree.setAnimated(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -287,7 +370,7 @@ class Sidebar(QWidget):
 
     # ------------------------------------------------------------------ #
     def toggle_section(self, collapsed: bool | None = None) -> None:
-        """Collapse the предметы tree to give the content more room."""
+        """Hide the предметы list to give the content more room."""
         if collapsed is None:
             collapsed = not self._tree_collapsed
         self._tree_collapsed = bool(collapsed)
@@ -308,18 +391,33 @@ class Sidebar(QWidget):
         self.main.all_page.search.setText(query)
         self.main.all_page.search.setFocus()
 
-    def collapse_all(self, collapsed: bool = True) -> None:
-        root = self.tree.invisibleRootItem()
-        for index in range(root.childCount()):
-            root.child(index).setExpanded(not collapsed)
+    def _rename_course(self, course_id: int) -> None:
+        """Manual name: the escape hatch when the API sends no usable title."""
+        course = db.get_course(course_id) or {}
+        title, ok = QInputDialog.getText(
+            self.main, "Название предмета", "Как называется предмет?",
+            text=course.get("title") or "",
+        )
+        title = title.strip()
+        if ok and title:
+            db.rename_course(course_id, title)
+            self.main.refresh()
+
+    def _rename_homework(self, subject_id: int) -> None:
+        homework = db.homework_row(subject_id) or {}
+        title, ok = QInputDialog.getText(
+            self.main, "Название домашки", "Как называется домашка?",
+            text=homework.get("title") or "",
+        )
+        title = title.strip()
+        if ok and title:
+            db.rename_subject(subject_id, title)
+            self.main.refresh()
 
     def _show_tree_menu(self, point) -> None:
         menu = QMenu(self)
-        menu.addAction("Свернуть все предметы", lambda: self.collapse_all(True))
-        menu.addAction("Развернуть все предметы", lambda: self.collapse_all(False))
-        menu.addSeparator()
         menu.addAction(
-            "Свернуть панель" if not self._tree_collapsed else "Развернуть панель",
+            "Показать список" if self._tree_collapsed else "Скрыть список",
             lambda: self.toggle_section(),
         )
         menu.exec(self.tree.viewport().mapToGlobal(point))
@@ -331,6 +429,8 @@ class Sidebar(QWidget):
         delegate = self.tree.itemDelegate()
         if isinstance(delegate, SidebarDelegate):
             delegate.set_palette(palette)
+        self.tree.set_branch_color(palette.muted)
+        self.tree.set_row_colors(palette.surface_alt, palette.accent_soft)
         self.tree.blockSignals(True)
         self.tree.clear()
         self.section_label.setText("ПРЕДМЕТЫ")
@@ -520,6 +620,8 @@ class Sidebar(QWidget):
                            lambda: self.main.sync_course(item_id))
             menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
                            lambda: QGuiApplication.clipboard().setText(str(item_id)))
+            menu.addAction(icons.icon("book", "#59616e", 16), "Переименовать…",
+                           lambda: self._rename_course(item_id))
             menu.addSeparator()
             menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить предмет из кэша",
                            lambda: self.main.delete_course(item_id))
@@ -531,6 +633,8 @@ class Sidebar(QWidget):
                            lambda: self.main.sync_subject(item_id))
             menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
                            lambda: QGuiApplication.clipboard().setText(str(item_id)))
+            menu.addAction(icons.icon("homework", "#59616e", 16), "Переименовать…",
+                           lambda: self._rename_homework(item_id))
         elif kind == "lesson":
             menu.addAction(icons.icon("external", "#59616e", 16), "Открыть урок",
                            lambda: self.navigate.emit(f"lesson:{item_id}"))

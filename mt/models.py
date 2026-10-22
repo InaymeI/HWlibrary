@@ -100,18 +100,35 @@ _TITLE_KEYS = (
     "label", "heading",
 )
 #: Strings that are just numbers/ids must never be shown as a name.
-_NUMERIC_RE = re.compile(r"^[\s\d/._#-]+$")
+_NUMERIC_RE = re.compile(r"^[\s\d/._#№-]+$")
+#: «Предмет #111130»: a course is never named after its own number, so any
+#: digits after the word make it a placeholder.
+_COURSE_PLACEHOLDER_RE = re.compile(
+    r"^(?:предмет|курс|subject|course)\s*[#№:]?\s*\d+$", re.IGNORECASE
+)
+#: «Домашка №1» is a real name, so for the other kinds only «#» or a long
+#: number counts as an id.
+_PLACEHOLDER_RE = re.compile(
+    r"^(?:домашка|урок|раздел|тест|задание|homework|lesson)"
+    r"\s*(?:#\s*\d+|№\s*\d{4,})$",
+    re.IGNORECASE,
+)
+#: «id 42», «ID: 42», «№ 42» — an id with a label.
+_ID_LABEL_RE = re.compile(r"^(?:id|ид|no\.?|номер|#|№)\s*[:#№]?\s*\d+$", re.IGNORECASE)
 
 
 def looks_like_id(text: str) -> bool:
-    """True for "12345", "#12345", "id 42" and other non-names."""
-    value = (text or "").strip()
+    """True for "12345", "#12345", "Предмет #42", "id 42" and other non-names."""
+    value = " ".join((text or "").split())
     if not value:
         return True
-    if _NUMERIC_RE.match(value):
+    if (
+        _COURSE_PLACEHOLDER_RE.match(value)
+        or _PLACEHOLDER_RE.match(value)
+        or _ID_LABEL_RE.match(value)
+    ):
         return True
-    lowered = value.lower()
-    return lowered.startswith(("id ", "id#", "id:")) and _NUMERIC_RE.match(value[3:])
+    return bool(_NUMERIC_RE.match(value))
 
 
 def pick_title(node: Any, *, depth: int = 0) -> str:
@@ -730,19 +747,50 @@ def extract_practice_blocks(payload: Any) -> list[PracticeBlock]:
     return sorted(unique.values(), key=lambda block: block.position)
 
 
-_COURSE_TITLE_KEYS = ("courseTitleForModule", "course_title_for_module",
-                      "courseName", "course_name")
+#: Exact keys that carry the предмет name.  ``courseTitleForModule`` is the
+#: field the site itself uses; the rest are tolerated spellings.
+_COURSE_TITLE_KEYS = (
+    "courseTitleForModule", "course_title_for_module", "courseTitle",
+    "course_title", "courseName", "course_name", "moduleTitle", "module_title",
+    "educationGroupName", "education_group_name", "groupName", "group_name",
+)
+#: Any key like ``courseTitle``/``course_title``/``moduleName`` is a candidate.
+_COURSE_TITLE_KEY_RE = re.compile(
+    r"^(?:course|module|educationgroup|education_group|group)"
+    r"(?:title|name|titleformodule|title_for_module)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_name(value: Any) -> str:
+    """A display-ready name from an API value, or ``""``."""
+    if isinstance(value, dict):
+        # ``{"value": "..."}`` / ``{"title": "..."}`` wrappers are common.
+        for key in ("value", "title", "name", "text"):
+            if key in value:
+                text = _normalize_name(value[key])
+                if text:
+                    return text
+        return ""
+    if not isinstance(value, (str, int)):
+        return ""
+    text = " ".join(strip_html(str(value)).split())
+    if not text or looks_like_id(text):
+        return ""
+    return text
 
 
 def find_course_title(payload: Any) -> str:
-    """The course name from ``courseTitleForModule`` (or similar) anywhere.
+    """The предмет name from ``courseTitleForModule`` (or similar) anywhere.
 
-    The education-groups response may omit the top-level name while every
-    lesson item carries ``courseTitleForModule`` — the field the site itself
-    uses to label the предмет.
+    The education-groups response may omit (or numerically mask) the top-level
+    name while lesson items, practice blocks and homework payloads carry
+    ``courseTitleForModule`` — the field the site itself uses for the предмет.
+    The walk is deep (the field sits several levels down in real responses) and
+    key-based rather than path-based, so a nesting change does not break it.
     """
     def walk(node: Any, depth: int) -> str:
-        if depth > 6 or node is None:
+        if depth > 14 or node is None:
             return ""
         if isinstance(node, list):
             for item in node:
@@ -753,10 +801,14 @@ def find_course_title(payload: Any) -> str:
         if not isinstance(node, dict):
             return ""
         for key in _COURSE_TITLE_KEYS:
-            value = node.get(key)
-            if isinstance(value, str):
-                text = strip_html(value)
-                if text and not looks_like_id(text):
+            if key in node:
+                text = _normalize_name(node[key])
+                if text:
+                    return text
+        for key, value in node.items():
+            if isinstance(key, str) and _COURSE_TITLE_KEY_RE.match(key):
+                text = _normalize_name(value)
+                if text:
                     return text
         for value in node.values():
             if isinstance(value, (dict, list)):

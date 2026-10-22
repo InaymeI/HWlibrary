@@ -185,6 +185,9 @@ def test_db_query_filters_and_search(temp_db):
     assert db.query_tests_count(search="ПРАВОПИСАНИЕ") == 1
     # LIKE wildcards must be escaped, not treated as patterns
     assert db.query_tests_count(search="%") == 0
+    # the names the user sees in the tree are searchable too
+    assert db.query_tests_count(search="русский") == 1
+    assert db.query_tests_count(search="математика сложное") == 1
 
 
 def test_db_migration_from_v1_schema(tmp_path):
@@ -787,6 +790,59 @@ def test_course_title_comes_from_course_title_for_module():
     assert models.find_course_title({"courseTitleForModule": "111137"}) == ""
 
 
+def test_course_title_is_found_in_deep_wrappers():
+    """The name may hide behind wrappers and dictionaries several levels down."""
+    assert models.find_course_title({"data": [{"entityInfo": {
+        "course_title": {"value": "  История   России "}}}]}) == "История России"
+    assert models.find_course_title({"a": {"b": {"c": {"d": {
+        "e": {"courseTitleForModule": "Обществознание"}}}}}}) == "Обществознание"
+    assert models.find_course_title({"moduleTitle": "111130"}) == ""
+    assert models.find_course_title({"courseName": "#111130"}) == ""
+
+
+def test_placeholders_are_not_names():
+    """«Предмет #111137» / «#111130» are placeholders, «Домашка №1» is a name."""
+    for placeholder in ("111137", "#111130", "Предмет #111137", "предмет №42",
+                        "Домашка #777", "Урок #3", "ID: 12", "№ 5", "  "):
+        assert models.looks_like_id(placeholder), placeholder
+    for real in ("История России", "Домашка №1", "Домашка №12", "Раздел 2"):
+        assert not models.looks_like_id(real), real
+
+
+def test_cached_numeric_titles_are_repaired_without_network(temp_db):
+    """An old cache shows real names: they are read from the stored payloads."""
+    import json as _json
+
+    db.upsert_course(111130, "Предмет #111130", {})
+    conn = db.get_connection()
+    conn.execute(
+        "INSERT INTO lessons(id, course_id, entity_lesson_id, title, position,"
+        " payload_json, fetched_at) VALUES(?,?,?,?,?,?,?)",
+        (41907180, 111130, 4772400, "Урок 1", 1,
+         _json.dumps({"id": 41907180, "courseTitleForModule": "Обществознание"}), 1),
+    )
+    conn.execute(
+        "INSERT INTO lesson_subjects(lesson_id, subject_id, title, position)"
+        " VALUES(?,?,?,?)",
+        (41907180, 900001, "", 1),
+    )
+    conn.commit()
+    db.upsert_subject(900001, "#900001", {"title": "Домашка №7"})
+
+    assert db.list_courses()[0]["title"] == "Обществознание"
+    assert db.get_course(111130)["title"] == "Обществознание"
+    homework = db.lesson_homeworks(41907180)[0]
+    assert homework["title"] == "Домашка №7"
+    assert db.homework_row(900001)["title"] == "Домашка №7"
+
+    # ...and the repair is written back once, so it survives a restart
+    assert db.repair_course_titles() == 2
+    rows = db.get_connection().execute(
+        "SELECT title FROM courses UNION ALL SELECT title FROM subjects"
+    ).fetchall()
+    assert {row["title"] for row in rows} == {"Обществознание", "Домашка №7"}
+
+
 def test_sync_replaces_a_generic_course_title(temp_db, monkeypatch):
     """A cached «Предмет #111137» is repaired by the next sync."""
     from mt.api import Api
@@ -977,7 +1033,7 @@ def test_database_upgrades_from_v2_to_course_schema(temp_db):
     database.upsert_course(1, "Новый курс", {})
     assert database.list_courses()[0]["title"] == "Новый курс"
     with sqlite3.connect(path) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert check.execute("PRAGMA user_version").fetchone()[0] == database.SCHEMA_VERSION
 
 
 # --------------------------------------------------------------------------- #
