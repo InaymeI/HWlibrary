@@ -8,6 +8,8 @@ import os
 import sys
 import traceback
 
+from . import config
+
 
 def _prepare_platform() -> None:
     """Wayland-first on Hyprland / Wayland sessions, X11 fallback everywhere."""
@@ -59,12 +61,16 @@ def main(argv: list[str] | None = None) -> int:
         prog="maximumtest",
         description="MaximumTest Library — просмотр заданий из локального кэша.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {config.APP_VERSION}")
     parser.add_argument("--db", metavar="PATH", help="использовать другую базу SQLite")
     parser.add_argument("--data-dir", metavar="DIR", help="каталог данных (вместо XDG)")
     parser.add_argument("--theme", choices=("light", "dark", "system"), help="тема оформления")
     parser.add_argument("--sync", metavar="SUBJECT_ID", type=int,
                         help="синхронизировать предмет и выйти")
+    parser.add_argument("--course", metavar="COURSE_ID", type=int,
+                        help="синхронизировать курс (уроки, практики, задания) и выйти")
+    parser.add_argument("--link", metavar="URL",
+                        help="ссылка на курс, предмет или задание — синхронизировать и выйти")
     args = parser.parse_args(argv)
 
     if args.data_dir:
@@ -82,12 +88,32 @@ def main(argv: list[str] | None = None) -> int:
     from PyQt6.QtGui import QFont
     from PyQt6.QtWidgets import QApplication
 
-    from . import config, db
+    from . import db
 
     config.ensure_dirs()
     if args.db:
         db.set_database_path(args.db)
     db.init()
+
+    # Headless modes never create a QApplication: they work over SSH / cron
+    # without a display and do not need a Qt platform plugin.
+    if args.link:
+        from .links import parse_link
+
+        link = parse_link(args.link)
+        if link is None:
+            print(f"Не удалось разобрать ссылку: {args.link}", file=sys.stderr)
+            return 2
+        if link.is_course and link.course_id:
+            return _run_sync([], [link.course_id])
+        if link.subject_id:
+            return _run_sync([link.subject_id], [])
+        print("В ссылке не найден предмет или курс", file=sys.stderr)
+        return 2
+    if args.course:
+        return _run_sync([], [args.course])
+    if args.sync:
+        return _run_sync([args.sync])
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName(config.APP_NAME)
@@ -107,9 +133,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.theme:
         QSettings().setValue("ui/theme", args.theme)
 
-    if args.sync:
-        return _run_sync(args.sync)
-
     install_excepthook()
     from .ui import MainWindow
 
@@ -118,41 +141,54 @@ def main(argv: list[str] | None = None) -> int:
     return app.exec()
 
 
-def _run_sync(subject_id: int) -> int:
+def _run_sync(subject_ids: list[int], course_ids: list[int] | None = None) -> int:
     """Headless synchronisation, useful for cron jobs and scripts."""
     from PyQt6.QtCore import QCoreApplication, Qt
 
-    from . import config, db
-    from .api import Api, ApiError
-    from .models import extract_kbs_entries
+    from . import db
+    from .api import Api
     from .sync import SyncThread
 
     config.ensure_dirs()
     app = QCoreApplication(sys.argv[:1])  # noqa: F841 - needed for QThread signals
     api = Api()
-    try:
-        base = api.get_curriculum_subject(subject_id)
-    except ApiError as exc:
-        print(f"Ошибка: {exc}", file=sys.stderr)
-        return 1
-    total = len(extract_kbs_entries(base))
-    print(f"Предмет #{subject_id}, разделов: {total}")
 
-    thread = SyncThread(api, [subject_id])
+    thread = SyncThread(api, subject_ids, course_ids)
     # No event loop runs here, so deliver signals directly from the worker.
-    thread.log.connect(lambda line: print(line, flush=True), type=Qt.ConnectionType.DirectConnection)
+    thread.log.connect(
+        lambda line: print(line, flush=True), type=Qt.ConnectionType.DirectConnection
+    )
     results: list = []
     thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
     thread.start()
     thread.wait()
-    if not results or results[0].error:
-        message = results[0].error if results else "синхронизация не запустилась"
-        print(f"Ошибка: {message}", file=sys.stderr)
+
+    if not results:
+        print("Ошибка: синхронизация не запустилась", file=sys.stderr)
         return 1
-    stats = db.subject_stats(subject_id)
-    print(f"Готово: {stats['kbs']} разделов, {stats['total']} тестов, "
-          f"{stats['supported']} с ответом")
-    return 0
+    failed = False
+    for result in results:
+        if result.error:
+            failed = True
+            print(f"Ошибка: {result.error}", file=sys.stderr)
+            continue
+        if result.course_id:
+            stats = db.course_stats(result.course_id)
+            print(
+                f"Курс #{result.course_id}: уроков {result.lessons}, "
+                f"предметов {stats['subjects']} · тестов {stats['total']}, "
+                f"с ответом {stats['supported']}"
+            )
+        else:
+            stats = db.subject_stats(result.subject_id)
+            print(
+                f"Предмет #{result.subject_id}: разделов {stats['kbs']} · "
+                f"тестов {stats['total']}, с ответом {stats['supported']}"
+            )
+    if not failed:
+        total = sum(result.tests for result in results)
+        print(f"Готово: тестов {total}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

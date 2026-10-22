@@ -189,3 +189,126 @@ def test_closing_after_cancelled_sync_is_safe(app, window):
         time.sleep(0.01)
     window.close()
     app.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# course structure
+# --------------------------------------------------------------------------- #
+def _subscribe_course(app, window) -> None:
+    """Cache the course from the fake v3 API without running a thread."""
+    from mt import db
+    from mt.api import Api
+    from mt.models import extract_course_title, extract_lessons, extract_practice_blocks
+    from tests.fake_server import COURSE_ID
+
+    api = Api()
+    api.set_cookies({"sessionid": "valid"})
+    payload = api.get_education_group(COURSE_ID)
+    db.upsert_course(COURSE_ID, extract_course_title(payload, ""), payload)
+    lessons = extract_lessons(payload)
+    db.replace_course_lessons(COURSE_ID, [lesson.as_row() for lesson in lessons])
+    for lesson in lessons:
+        blocks = extract_practice_blocks(api.get_lesson_structure(COURSE_ID, lesson.id))
+        db.set_lesson_subjects(lesson.id, [block.as_row() for block in blocks])
+    window.refresh()
+    app.processEvents()
+
+
+def _wait_sync(app, window, timeout: float = 30.0) -> None:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        app.processEvents()
+        current = window._sync
+        if current is None or not current.isRunning():
+            break
+        time.sleep(0.01)
+    for _ in range(10):
+        app.processEvents()
+
+
+def test_course_structure_appears_in_sidebar_and_pages(app, window):
+    """Course → lesson → subject → kbs, both in the tree and on the pages."""
+    from PyQt6.QtCore import Qt
+
+    from tests.fake_server import (
+        COURSE_ID,
+        LESSON_DB_ID,
+        LESSON_ENTITY_ID,
+        SUBJECT_ID,
+    )
+
+    _subscribe_course(app, window)
+
+    tree = window.sidebar.tree
+    assert tree.topLevelItemCount() == 1  # the subject is grouped under the course
+    course_item = tree.topLevelItem(0)
+    assert course_item.data(0, Qt.ItemDataRole.UserRole) == ("course", COURSE_ID)
+    assert course_item.childCount() == 2
+    lesson_item = course_item.child(0)
+    assert lesson_item.data(0, Qt.ItemDataRole.UserRole) == ("lesson", LESSON_DB_ID)
+    subject_item = lesson_item.child(0)
+    assert subject_item.data(0, Qt.ItemDataRole.UserRole) == ("subject", SUBJECT_ID)
+    assert subject_item.childCount() == 2  # two knowledge bases of the subject
+
+    window.navigate("courses")
+    assert window.stack.currentWidget() is window.courses_page
+    window.navigate(f"course:{COURSE_ID}")
+    assert window.stack.currentWidget() is window.course_page
+    window.navigate(f"lesson:{LESSON_DB_ID}")
+    assert window.stack.currentWidget() is window.lesson_page
+
+    window.navigate("test:1001")
+    app.processEvents()
+    # the entity lesson id from the course wins over the tree's lessonId
+    assert window.test_page.lesson_input.value() == LESSON_ENTITY_ID
+
+
+def test_open_task_link_opens_cached_test(app, window):
+    from mt.links import parse_link
+    from tests.fake_server import COURSE_ID
+
+    link = parse_link(
+        "https://education.maximumtest.ru/lesson/4772366/subjects/777/practice/kbs/501"
+        f"/tests/1002?backPage=/student/courses/{COURSE_ID}/lessons&type=online"
+    )
+    window.open_link(link)
+    app.processEvents()
+    assert window.stack.currentWidget() is window.test_page
+    assert window.test_page.test_id == 1002
+
+
+def test_course_link_starts_full_sync(app, window):
+    from mt import db
+    from mt.links import parse_link
+    from tests.fake_server import COURSE_ID
+
+    window.open_link(parse_link("https://education.maximumtest.ru/student/courses/111137/lessons"))
+    assert window._sync is not None
+    assert window._sync.course_ids == [COURSE_ID]
+    _wait_sync(app, window)
+
+    assert db.get_course(COURSE_ID) is not None
+    assert db.course_stats(COURSE_ID)["subjects"] == 1
+    window.navigate(f"course:{COURSE_ID}")
+    assert window.stack.currentWidget() is window.course_page
+
+
+def test_task_link_syncs_subject_and_then_opens_test(app, window):
+    """Paste a task link while the cache is empty: download, then navigate."""
+    from mt import db
+    from mt.links import parse_link
+
+    db.clear_cache()
+    window.refresh()
+    window.open_link(parse_link(
+        "https://education.maximumtest.ru/lesson/4772366/subjects/777/practice/kbs/501"
+        "/tests/1001?backPage=/student/courses/111137/lessons&type=online"
+    ))
+    assert window._pending_test == 1001
+    _wait_sync(app, window)
+
+    assert window.test_page.test_id == 1001
+    assert window.stack.currentWidget() is window.test_page
+    assert window._pending_test is None

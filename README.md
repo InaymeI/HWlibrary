@@ -5,23 +5,38 @@
 серверы и не требует пароля — доступ к заданиям выполняется через cookies вашей
 сессии в браузере.
 
-![Обзор](docs/screenshot-dashboard.png)
+![Курс](docs/screenshot-course.png)
+
+<p align="center">
+  <img src="docs/screenshot-courses.png" width="49%" alt="Курсы">
+  <img src="docs/screenshot-test.png" width="49%" alt="Задание">
+</p>
 
 <p align="center">
   <img src="docs/screenshot-subject.png" width="49%" alt="Предмет">
-  <img src="docs/screenshot-test.png" width="49%" alt="Задание">
-  <img src="docs/screenshot-dark.png" width="100%" alt="Тёмная тема">
+  <img src="docs/screenshot-dark.png" width="49%" alt="Тёмная тема">
 </p>
 
 ## Что умеет
 
+- **Вся структура курса из одной ссылки.** Вставьте адрес страницы курса
+  (`/student/courses/111137/lessons`) — приложение прочитает уроки
+  (`education-groups`), структуру каждого урока (`structures`), найдёт блоки
+  `curriculum_practice_block` (это предметы) и скачает все их разделы и задания.
+- **Дерево «курс → урок → предмет → раздел»** в боковой панели и отдельные
+  страницы курсов/уроков со счётчиками «с ответом / всего».
+- **Ссылка на задание** (`/lesson/4772366/subjects/51610/practice/kbs/8931/tests/289165?type=online`)
+  разбирается целиком: курс, урок, предмет, раздел, режим и номер задания.
+  Если задание уже в кэше — оно сразу откроется, иначе скачается его предмет.
 - **Синхронизация** предметов и разделов в локальную базу SQLite (WAL, пакетные
   транзакции), с отменой, повтором и подробным журналом.
-- **Дерево предметов** в боковой панели: разделы и счётчики «с ответом / всего».
 - **Мгновенный поиск** по всей базе: название, ID, тип, раздел. Поиск
   регистронезависимый для кириллицы.
 - **Просмотр задания**: условие с форматированием, все варианты с отмеченными
   правильными, готовый ответ и метаданные (lessonId, время сохранения).
+  `lessonId` для отправки берётся из структуры курса — это тот самый
+  *entity lesson id* из ссылки (`/lesson/4772366/…`), а не номер урока из дерева
+  предмета.
 - **Автоответ** для типов `type1`–`type5` по спецификации API: `type1`/`type2` —
   ID вариантов, `type3`/`type4` — тексты в порядке `sort`, `type5` — по одному
   полю на правильный ответ (из `variants` выбирается один допустимый вариант).
@@ -56,8 +71,13 @@ python -m venv .venv
 1. Войдите на **education.maximumtest.ru** в браузере.
 2. В приложении нажмите **Cookies сессии** → «Импорт из Firefox» (или
    скопируйте заголовок `Cookie` из DevTools → Network и вставьте в поле).
-3. **Добавить предмет** — вставьте ссылку вида
-   `https://education.maximumtest.ru/subjects/1234/` или просто `1234`.
+3. **Добавить курс или предмет** — вставьте ссылку. Поддерживаются:
+
+   | Ссылка | Что произойдёт |
+   | --- | --- |
+   | `/student/courses/111137/lessons` | скачается курс: уроки → практики → предметы → разделы → задания |
+   | `/lesson/4772366/subjects/51610/practice/kbs/8931/tests/289165?type=online` | откроется это задание (или скачается его предмет) |
+   | `/subjects/51610/` или `51610` | скачается предмет |
 4. После синхронизации задания доступны офлайн.
 
 ### Где хранятся данные
@@ -78,23 +98,37 @@ python -m venv .venv
 | ---------- | --------------------------------- |
 | `F5`       | синхронизировать текущий предмет   |
 | `Ctrl+R`   | обновить интерфейс из кэша        |
-| `Ctrl+N`   | добавить предмет                  |
+| `Ctrl+N`   | добавить курс/предмет по ссылке    |
 | `Ctrl+F`   | поиск по всем тестам              |
 | `Ctrl+L`   | журнал синхронизации              |
 | `Alt+←/→`  | назад / вперёд                    |
 | `F1`       | справка                           |
 | `Ctrl+Q`   | выход                             |
 
+## Командная строка
+
+```bash
+./run.sh                                  # графический интерфейс
+./.venv/bin/python -m mt --sync 51610     # синхронизировать предмет
+./.venv/bin/python -m mt --course 111137  # синхронизировать курс целиком
+./.venv/bin/python -m mt --link "https://education.maximumtest.ru/student/courses/111137/lessons"
+```
+
+`--sync`, `--course` и `--link` работают без графической сессии.
+
 ## Соответствие API
 
 | Что | Реализация |
 | --- | --- |
+| Уроки курса | `GET /api/v3/student/education-groups/{courseId}?perPage=50&page=N`; пагинация по `meta.last_page`, дубли по `id` отбрасываются |
+| Структура урока | `GET /api/v3/student/education-groups/{courseId}/structures/{lessonId}`; из `data.children` берутся блоки `curriculum_practice_block`, их `entityInfo.id` — это `subjectId` |
+| `entity lesson id` | `entityInfo.id` урока; именно он идёт в `lessonId` тела ответа |
 | Дерево предмета | `GET /curriculumsubject/{sid}`; обход `online → offline → aftertheory`, `lessonId` сохраняется |
 | Тесты раздела | `GET /…/knowledgebase/{kbs}/{mode}/tests`, режимы перебираются по порядку `kbs.mode → online → offline → aftertheory`, берётся первый массив |
 | Пустые ответы | не кэшируются: ошибка или `[]` не затирает уже сохранённые данные |
 | Дубли тестов | один объект на `test.id` (Set по id + `PRIMARY KEY` в SQLite) |
 | Отправка ответа | `POST /…/tests/{tid}`: `lessonId` (строка), `attaches: []`, `answer`, `spentTime` 45–90 |
-| `lessonId` fallback | `tree.lessonId` → `lessonId` из ссылки `/lesson/<id>/subjects/<id>/practice/kbs/…` → ручной ввод |
+| `lessonId` fallback | структура курса (entity id) → ссылка `/lesson/<id>/subjects/…` → `tree.lessonId` → ручной ввод |
 | Ответ сервера | `result: "true" \| false` и/или `percent: 100` |
 | Ретраи | POST: 3 попытки, пауза 400 мс (только 5xx/429/сеть); GET: 2 повтора |
 | Пауза между запросами | 300 мс (`SYNC_DELAY_MS`) — rate limit неизвестен |
@@ -115,7 +149,7 @@ python -m mt --sync 1234                  # синхронизировать п�
 
 ```bash
 ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/python -m pytest            # 36 тестов, включая фиктивный сервер
+./.venv/bin/python -m pytest            # 45 тестов, включая фиктивный сервер
 ./.venv/bin/python -m ruff check mt tests
 ```
 
@@ -127,7 +161,8 @@ python -m mt --sync 1234                  # синхронизировать п�
 
 ```
 mt/
-├── __main__.py      точка входа, CLI, Wayland-детект, excepthook
+├── __main__.py      точка входа, CLI (--sync/--course/--link), Wayland-детект, excepthook
+├── links.py         разбор ссылок: курс, урок, предмет, раздел, задание
 ├── config.py        пути, эндпоинты, константы (без побочных эффектов при импорте)
 ├── db.py            SQLite-кэш: схема, миграции, запросы, агрегаты
 ├── api.py           HTTP-клиент: ретраи, таймауты, безопасное хранение cookies
