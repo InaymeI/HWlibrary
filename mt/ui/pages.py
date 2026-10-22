@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QGuiApplication, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -43,8 +42,10 @@ from ..models import (
 )
 from ..theme import Palette
 from ..widgets import (
+    ICONS,
     AutoHeightTextBrowser,
     Badge,
+    ElidedLabel,
     EmptyState,
     FlowLayout,
     ListRow,
@@ -64,6 +65,11 @@ TYPE_NAMES = {
     "type4": "ввод текста",
     "type5": "сопоставление",
 }
+
+
+def type_caption(row: dict[str, Any]) -> str:
+    """Human name of a test type; unsupported ones read as one phrase."""
+    return TYPE_NAMES.get(row.get("type") or "") or "без автоответа"
 
 
 def clear_layout(layout) -> None:
@@ -136,8 +142,9 @@ class PageHeader(QFrame):
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.title = label("", "h1")
-        self.title.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.title = ElidedLabel("")
+        self.title.setProperty("role", "h1")
+        self.title.setMinimumWidth(120)
         row.addWidget(self.title, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.badge_box = QHBoxLayout()
@@ -154,6 +161,8 @@ class PageHeader(QFrame):
         outer.addWidget(self.subtitle)
 
         self._badges: list[Badge] = []
+        self._action_widgets: list[QWidget] = []
+        self._more_button: QToolButton | None = None
 
     def set_content(
         self,
@@ -180,8 +189,67 @@ class PageHeader(QFrame):
             self._badges.append(badge)
 
         clear_layout(self.actions)
-        for widget in actions:
+        for widget in self._action_widgets:
+            widget.setParent(None)
+            widget.deleteLater()
+        self._action_widgets = list(actions)
+        for widget in self._action_widgets:
             self.actions.addWidget(widget)
+        self._more_button = QToolButton(self)
+        self._more_button.setObjectName("moreActions")
+        self._more_button.setText("•••")
+        self._more_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._more_button.setToolTip("Ещё действия")
+        self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.actions.addWidget(self._more_button)
+        self._fit_actions()
+
+    def _fit_actions(self) -> None:
+        """Show as many header buttons as the width allows, the rest in «…».
+
+        Measured, not guessed: the title (capped), the badges and every button
+        are compared with the header width, so a narrow window moves the last
+        buttons into a menu instead of squeezing the title into «Истори…».
+        """
+        if self._more_button is None:
+            return
+        buttons = self._action_widgets
+        if not buttons:
+            self._more_button.setVisible(False)
+            return
+
+        margin = self.layout().contentsMargins()
+        available = max(320, self.width() - margin.left() - margin.right())
+        badges = self.badge_box.sizeHint().width() if self._badges else 0
+        shown = len(buttons)
+        while shown > 0:
+            buttons_width = sum(
+                widget.sizeHint().width() for widget in buttons[:shown]
+            )
+            more = 44 if shown < len(buttons) else 0
+            needed = ElidedLabel.MIN_WIDTH + badges + buttons_width + more + 10 * (shown + 2)
+            if needed <= available:
+                break
+            shown -= 1
+
+        for widget in buttons[:shown]:
+            widget.setVisible(True)
+        for widget in buttons[shown:]:
+            widget.setVisible(False)
+        self._more_button.setVisible(shown < len(buttons))
+        if shown == len(buttons):
+            self._more_button.setMenu(None)
+            return
+        menu = QMenu(self._more_button)
+        for widget in buttons[shown:]:
+            text = widget.text() or widget.toolTip() or "Действие"
+            action = menu.addAction(text)
+            action.triggered.connect(widget.click)
+        self._more_button.setMenu(menu)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._fit_actions()
 
 
 class ScrollPage(QWidget):
@@ -247,11 +315,11 @@ class DashboardPage(ScrollPage):
             ("домашек", fmt_int(stats["subjects"]), "homework"),
             ("тестов", fmt_int(stats["total"]), "layers"),
             ("с готовым ответом", fmt_int(stats["supported"]), "check"),
-            ("последнее обновление", relative_time(stats["updated_at"]), "clock"),
+            ("обновлено", relative_time(stats["updated_at"]), "clock"),
         ):
             card = StatCard(caption, value, icon_name)
             card.set_theme(palette)
-            cards.addWidget(card)
+            cards.addWidget(card, 1)
         self.body.addLayout(cards)
 
         if not has_data:
@@ -339,7 +407,7 @@ class DashboardPage(ScrollPage):
             self.body.addWidget(SectionTitle("Предметы", len(courses)))
             for course in courses[:4]:
                 row = ListRow(
-                    course["title"] or f"Курс #{course['id']}",
+                    course["title"] or f"Предмет #{course['id']}",
                     " · ".join((
                         f"{course['lesson_count']} "
                         f"{plural(course['lesson_count'], 'урок', 'урока', 'уроков')}",
@@ -348,8 +416,6 @@ class DashboardPage(ScrollPage):
                         f"{fmt_int(course['total'])} "
                         f"{plural(course['total'], 'тест', 'теста', 'тестов')}",
                     )),
-                    badges=[(f"{fmt_int(course['supported'])} с ответом",
-                             "success" if course["supported"] else "muted")],
                     trailing=f"{course['supported']}/{course['total']}",
                     icon_name="book",
                 )
@@ -370,15 +436,13 @@ class DashboardPage(ScrollPage):
             for homework in standalone[:6]:
                 row = ListRow(
                     homework["title"] or f"Домашка #{homework['id']}",
-                    f"домашка #{homework['id']} · "
-                    f"{int(homework['sections'])} "
-                    f"{plural(int(homework['sections']), 'раздел', 'раздела', 'разделов')}",
-                    badges=[
-                        (f"{fmt_int(homework['total'])} "
-                         f"{plural(homework['total'], 'тест', 'теста', 'тестов')}", "muted"),
-                        (f"{fmt_int(homework['supported'])} с ответом",
-                         "success" if homework["supported"] else "muted"),
-                    ],
+                    " · ".join((
+                        f"{int(homework['sections'])} "
+                        f"{plural(int(homework['sections']), 'раздел', 'раздела', 'разделов')}",
+                        f"{fmt_int(homework['total'])} "
+                        f"{plural(homework['total'], 'тест', 'теста', 'тестов')}",
+                    )),
+                    trailing=f"{homework['supported']}/{homework['total']}",
                     icon_name="homework",
                 )
                 row.clicked.connect(
@@ -387,16 +451,6 @@ class DashboardPage(ScrollPage):
                 )
                 self.body.addWidget(row)
         self.body.addStretch(1)
-
-
-def _nested(widget: QWidget, indent: int = 30) -> QWidget:
-    """Indent a row so it visually belongs to the item above it."""
-    wrapper = QWidget()
-    layout = QVBoxLayout(wrapper)
-    layout.setContentsMargins(indent, 0, 0, 0)
-    layout.setSpacing(0)
-    layout.addWidget(widget)
-    return wrapper
 
 
 class CoursesPage(ScrollPage):
@@ -416,17 +470,14 @@ class CoursesPage(ScrollPage):
 
     def refresh(self) -> None:
         clear_layout(self.body)
+        add_button = primary_button("Добавить из ссылки", "plus")
+        add_button.clicked.connect(self.main.add_link_dialog)
         self.header.set_content(
             "Предметы",
             "Уроки и домашки, загруженные из ссылки на предмет.",
             breadcrumb=[("Библиотека", "dash"), ("Предметы", None)],
+            actions=[add_button],
         )
-        add_button = primary_button("Добавить из ссылки", "plus")
-        add_button.clicked.connect(self.main.add_link_dialog)
-        row = QHBoxLayout()
-        row.addWidget(add_button)
-        row.addStretch(1)
-        self.body.addLayout(row)
 
         courses = db.list_courses()
         if not courses:
@@ -451,7 +502,6 @@ class CoursesPage(ScrollPage):
             total = course.get("total") or 0
             supported = course.get("supported") or 0
             subtitle = " · ".join((
-                f"ID {course['id']}",
                 f"{fmt_int(lessons)} {plural(lessons, 'урок', 'урока', 'уроков')}",
                 f"{fmt_int(homeworks)} {plural(homeworks, 'домашка', 'домашки', 'домашек')}",
                 f"обновлено {relative_time(course.get('fetched_at'))}",
@@ -459,10 +509,6 @@ class CoursesPage(ScrollPage):
             row = ListRow(
                 course["title"] or f"Предмет #{course['id']}",
                 subtitle,
-                badges=[
-                    (f"{fmt_int(total)} {plural(total, 'тест', 'теста', 'тестов')}", "muted"),
-                    (f"{fmt_int(supported)} с ответом", "success" if supported else "muted"),
-                ],
                 trailing=f"{supported}/{total}",
                 icon_name="book",
             )
@@ -485,7 +531,7 @@ def homework_row_widget(
     total = int(homework.get("total") or 0)
     supported = int(homework.get("supported") or 0)
     sections = int(homework.get("sections") or 0)
-    bits = [f"Домашка #{subject_id}"]
+    bits: list[str] = []
     if sections:
         bits.append(f"{fmt_int(sections)} {plural(sections, 'раздел', 'раздела', 'разделов')}")
     if total:
@@ -495,10 +541,6 @@ def homework_row_widget(
     row = ListRow(
         homework.get("title") or f"Домашка #{subject_id}",
         " · ".join(bits),
-        badges=(
-            [(f"{fmt_int(supported)} с ответом", "success" if supported else "muted")]
-            if supported else []
-        ),
         trailing=f"{supported}/{total}" if total else "",
         icon_name=icon,
     )
@@ -556,29 +598,22 @@ class LessonCard(QFrame):
         left.addLayout(title_row)
         top.addLayout(left, 1)
 
-        right = QVBoxLayout()
-        right.setSpacing(2)
+        right = QHBoxLayout()
+        right.setSpacing(8)
         if meta.online:
-            online = QHBoxLayout()
-            online.setSpacing(5)
             online_icon = QLabel()
-            online_icon.setPixmap(icons.pixmap("video", palette.muted, 13))
-            online.addWidget(online_icon)
-            online.addWidget(label("Онлайн", "muted"))
-            right.addLayout(online)
-        if meta.time_text:
-            time_label = label(meta.time_text, "muted")
-            time_label.setAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            right.addWidget(time_label)
+            online_icon.setPixmap(icons.pixmap("video", palette.muted, 14))
+            right.addWidget(online_icon)
+            time_text = f" {meta.time_text}" if meta.time_text else ""
+            right.addWidget(label(f"Онлайн{time_text}", "muted"))
         self.chevron = QToolButton()
         self.chevron.setAutoRaise(True)
         self.chevron.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chevron.setToolTip("Свернуть урок" if expanded else "Показать домашки")
         self.chevron.clicked.connect(self.toggle)
-        right.addWidget(self.chevron, 0, Qt.AlignmentFlag.AlignRight)
-        top.addLayout(right)
+        right.addWidget(self.chevron)
+        top.addLayout(right, 0)
+        top.setAlignment(right, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(top)
 
         if meta.progress is not None:
@@ -676,7 +711,6 @@ class CoursePage(ScrollPage):
         self.header.set_content(
             title,
             " · ".join((
-                f"ID {self.course_id}",
                 f"{fmt_int(stats['lessons'])} "
                 f"{plural(stats['lessons'], 'урок', 'урока', 'уроков')}",
                 f"{fmt_int(stats['homeworks'])} "
@@ -756,7 +790,7 @@ class LessonPage(ScrollPage):
         open_course.clicked.connect(
             lambda: self.navigate.emit(f"course:{lesson['course_id']}")
         )
-        bits = [f"lessonId {lesson['entity_lesson_id']}"] if lesson.get("entity_lesson_id") else []
+        bits: list[str] = []
         if meta.date_text:
             bits.append(meta.date_text)
         if homeworks:
@@ -860,12 +894,6 @@ class HomeworkPage(ScrollPage):
 
         sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_subject(self.subject_id))
-        list_button = secondary_button("Списком", "grid")
-        list_button.clicked.connect(
-            lambda: self.navigate.emit(
-                f"kbs:{sections[0]['id']}" if sections else f"homework:{self.subject_id}"
-            )
-        )
 
         breadcrumb: list[tuple[str, str | None]] = [("Библиотека", "dash")]
         if lesson:
@@ -884,36 +912,29 @@ class HomeworkPage(ScrollPage):
         self.header.set_content(
             title,
             " · ".join(bit for bit in (
-                f"домашка #{self.subject_id}",
                 f"{fmt_int(len(sections))} {plural(len(sections), 'раздел', 'раздела', 'разделов')}",
                 f"{fmt_int(total)} {plural(total, 'тест', 'теста', 'тестов')}",
                 meta.date_text if meta else "",
             ) if bit),
             breadcrumb=breadcrumb,
             badges=[(f"{fmt_int(supported)} с ответом", "success" if supported else "muted")],
-            actions=[sync_button, list_button],
+            actions=[sync_button],
         )
 
         if sections:
-            card = QFrame()
-            card.setObjectName("cardFlat")
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(16, 10, 16, 12)
-            card_layout.setSpacing(4)
-            card_layout.addWidget(label("Разделы домашки", "muted"))
+            self.body.addWidget(SectionTitle("Разделы домашки", len(sections)))
             for section in sections:
-                row = QHBoxLayout()
-                row.setSpacing(8)
-                name = label(section.get("title") or f"Раздел #{section['id']}")
-                row.addWidget(name)
-                row.addStretch(1)
-                row.addWidget(label(
+                row_widget = ListRow(
+                    section.get("title") or f"Раздел #{section['id']}",
                     f"{fmt_int(int(section.get('total') or 0))} "
                     f"{plural(int(section.get('total') or 0), 'тест', 'теста', 'тестов')}",
-                    "muted",
-                ))
-                card_layout.addLayout(row)
-            self.body.addWidget(card)
+                    trailing=f"{int(section.get('supported') or 0)}/{int(section.get('total') or 0)}",
+                )
+                section_id = int(section["id"])
+                row_widget.clicked.connect(
+                    lambda _checked=False, sid=section_id: self.navigate.emit(f"kbs:{sid}")
+                )
+                self.body.addWidget(row_widget)
 
         if not self._tests:
             load_button = primary_button("Загрузить задания", "refresh")
@@ -978,10 +999,13 @@ class HomeworkPage(ScrollPage):
                 background, color, border = palette.surface_alt, palette.text_secondary, "transparent"
             chip.setStyleSheet(
                 f"QPushButton {{ background: {background}; color: {color};"
-                f" border: 2px solid {border}; border-radius: 8px;"
+                f" border: 2px solid {border}; border-radius: 9px;"
                 f" font-weight: {'700' if current else '600'}; }}"
                 "QPushButton:hover { border-color: " + palette.accent + "; }"
             )
+            # The stylesheet resets the constraints it knows about, so the
+            # fixed size goes last: square chips with the number inside.
+            chip.setFixedSize(38, 34)
 
     def chip_count(self) -> int:
         return len(self._chips)
@@ -1032,7 +1056,6 @@ class HomeworkPage(ScrollPage):
         ))
         head.addWidget(label(details.title, "muted"))
         head.addStretch(1)
-        head.addWidget(label(f"#{details.id}", "muted"))
         layout.addLayout(head)
 
         browser = AutoHeightTextBrowser()
@@ -1128,6 +1151,7 @@ class KbsPage(QWidget):
         self.kbs_id: int | None = None
         self._tests: list[dict[str, Any]] = []
         self._filtered: list[dict[str, Any]] = []
+        self._palette = main.theme_palette()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1153,18 +1177,17 @@ class KbsPage(QWidget):
         self.table.setHorizontalHeaderLabels(["Тип", "ID", "Задание", "Ответ"])
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setWordWrap(False)
-        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.verticalHeader().setDefaultSectionSize(40)
         header = self.table.horizontalHeader()
         header.setHighlightSections(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 150)
+        self.table.setColumnWidth(0, 165)
         self.table.setColumnWidth(1, 90)
         self.table.setColumnWidth(3, 190)
         self.table.cellDoubleClicked.connect(self._open_selected)
@@ -1190,6 +1213,7 @@ class KbsPage(QWidget):
         self.refresh()
 
     def apply_theme(self, palette: Palette) -> None:
+        self._palette = palette
         self.search.set_icon_color(palette.muted)
         self.refresh()
 
@@ -1212,9 +1236,8 @@ class KbsPage(QWidget):
         sync_button.clicked.connect(lambda: self.main.sync_subject(kbs["subject_id"]))
         self.header.set_content(
             title,
-            f"Предмет: {subject.get('title') or kbs['subject_id']}"
-            f" · режим: {config.mode_label(kbs.get('mode'))}"
-            + (f" · lesson {kbs['lesson_id']}" if kbs.get("lesson_id") else ""),
+            f"Домашка: {subject.get('title') or 'без названия'}"
+            f" · режим: {config.mode_label(kbs.get('mode'))}",
             breadcrumb=[
                 ("Библиотека", "dash"),
                 (subject.get("title") or "Домашка", f"homework:{kbs['subject_id']}"),
@@ -1239,10 +1262,13 @@ class KbsPage(QWidget):
         sort_column, sort_order = self._sort_state()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
+        palette = self._palette
         for index, row in enumerate(rows):
             supported = config.is_supported(row.get("type"))
-            type_item = QTableWidgetItem(row.get("type") or "—")
-            type_item.setForeground(QColor("#4a63dd" if supported else "#8b93a1"))
+            type_item = QTableWidgetItem(type_caption(row))
+            type_item.setForeground(
+                QColor(palette.accent if supported else palette.muted)
+            )
             font = type_item.font()
             font.setBold(True)
             type_item.setFont(font)
@@ -1253,7 +1279,7 @@ class KbsPage(QWidget):
             title_item = QTableWidgetItem(test_title(row))
             title_item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
             if not supported:
-                title_item.setForeground(QColor("#8b93a1"))
+                title_item.setForeground(QColor(palette.muted))
             self.table.setItem(index, 2, title_item)
 
             answer = "—"
@@ -1263,7 +1289,7 @@ class KbsPage(QWidget):
                 except Exception:  # noqa: BLE001 - preview must never break the table
                     answer = "—"
             answer_item = QTableWidgetItem(answer)
-            answer_item.setForeground(QColor("#59616e"))
+            answer_item.setForeground(QColor(palette.text_secondary))
             self.table.setItem(index, 3, answer_item)
         self.table.setSortingEnabled(True)
         if self.table.rowCount():
@@ -1381,7 +1407,6 @@ class TestPage(ScrollPage):
 
         badges = [
             (TYPE_NAMES.get(details.type, details.type or "тип неизвестен"), "accent"),
-            (f"ID {details.id}", "muted"),
             ("поддерживается" if details.supported else "только просмотр",
              "success" if details.supported else "warning"),
         ]
@@ -1392,7 +1417,6 @@ class TestPage(ScrollPage):
                 ("Библиотека", "dash"),
                 (subject.get("title") or "Домашка", f"homework:{row['subject_id']}"),
                 (kbs.get("title") or f"Раздел #{row['kbs_id']}", f"kbs:{row['kbs_id']}"),
-                (f"#{details.id}", None),
             ],
             badges=badges,
             actions=[prev_button, next_button, json_button],
@@ -1495,7 +1519,6 @@ class TestPage(ScrollPage):
                 check = QLabel()
                 check.setPixmap(icons.pixmap("check", palette.success, 16))
                 row_layout.addWidget(check, 0, Qt.AlignmentFlag.AlignTop)
-            row_layout.addWidget(label(f"#{option.id}", "muted"))
             layout.addWidget(row)
         self.body.addWidget(card)
 
@@ -1585,8 +1608,7 @@ class TestPage(ScrollPage):
         send_row.addStretch(1)
         self.send_button = QPushButton("Отправить ответ")
         self.send_button.setProperty("variant", "primary")
-        self.send_button.setIcon(icons.icon("send", "#ffffff", 16))
-        self.send_button.setIconSize(QSize(16, 16))
+        ICONS.bind(self.send_button, "send", "on_accent", 16)
         self.send_button.clicked.connect(self.send_answer)
         send_row.addWidget(self.send_button)
         layout.addLayout(send_row)
@@ -1602,8 +1624,8 @@ class TestPage(ScrollPage):
         subject = db.get_subject(row["subject_id"]) or {}
         kbs = self.kbs or {}
         for caption, value in (
-            ("Домашка", subject.get("title") or f"#{row['subject_id']}"),
-            ("Раздел", kbs.get("title") or f"#{row['kbs_id']}"),
+            ("Домашка", subject.get("title") or f"Домашка #{row['subject_id']}"),
+            ("Раздел", kbs.get("title") or f"Раздел #{row['kbs_id']}"),
             ("Сохранено", cached),
             ("Правильных ответов", str(len(details.right_options))),
         ):
@@ -1665,6 +1687,7 @@ class AllTestsPage(QWidget):
         super().__init__()
         self.main = main
         self._rows: list[dict[str, Any]] = []
+        self._palette = main.theme_palette()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -1708,20 +1731,19 @@ class AllTestsPage(QWidget):
         self.table.setHorizontalHeaderLabels(["ID", "Домашка", "Раздел", "Тип", "Задание"])
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setWordWrap(False)
-        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.verticalHeader().setDefaultSectionSize(40)
         header = self.table.horizontalHeader()
         header.setHighlightSections(False)
         for column in range(4):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(0, 80)
+        self.table.setColumnWidth(0, 74)
         self.table.setColumnWidth(1, 190)
-        self.table.setColumnWidth(2, 220)
-        self.table.setColumnWidth(3, 140)
+        self.table.setColumnWidth(2, 200)
+        self.table.setColumnWidth(3, 168)
         self.table.cellDoubleClicked.connect(self._open_row)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
@@ -1757,9 +1779,11 @@ class AllTestsPage(QWidget):
         current = self.subject_combo.currentData()
         self.subject_combo.blockSignals(True)
         self.subject_combo.clear()
-        self.subject_combo.addItem("Все предметы", None)
+        self.subject_combo.addItem("Все домашки", None)
         for subject in db.list_subjects():
-            self.subject_combo.addItem(subject["title"] or f"#{subject['id']}", subject["id"])
+            self.subject_combo.addItem(
+                subject["title"] or f"Домашка #{subject['id']}", subject["id"]
+            )
         index = self.subject_combo.findData(current)
         self.subject_combo.setCurrentIndex(index if index >= 0 else 0)
         self.subject_combo.blockSignals(False)
@@ -1783,6 +1807,7 @@ class AllTestsPage(QWidget):
         self._rows = rows
         total = db.query_tests_count(search=search, subject_id=subject_id, type_filter=type_filter)
 
+        palette = self._palette
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for index, row in enumerate(rows):
@@ -1796,8 +1821,10 @@ class AllTestsPage(QWidget):
             kbs_item.setToolTip(f"ID {row['kbs_id']} · {config.mode_label(row.get('kbs_mode'))}")
             self.table.setItem(index, 2, kbs_item)
 
-            type_item = QTableWidgetItem(row.get("type") or "—")
-            type_item.setForeground(QColor("#4a63dd" if supported else "#8b93a1"))
+            type_item = QTableWidgetItem(type_caption(row))
+            type_item.setForeground(
+                QColor(palette.accent if supported else palette.muted)
+            )
             font = type_item.font()
             font.setBold(True)
             type_item.setFont(font)
@@ -1806,7 +1833,7 @@ class AllTestsPage(QWidget):
             title_item = QTableWidgetItem(row.get("title") or f"Тест #{row['id']}")
             title_item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
             if not supported:
-                title_item.setForeground(QColor("#8b93a1"))
+                title_item.setForeground(QColor(palette.muted))
             self.table.setItem(index, 4, title_item)
         self.table.setSortingEnabled(True)
         if self.table.rowCount():

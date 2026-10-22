@@ -77,7 +77,7 @@ def subscribe(app, server, subject_id: int) -> None:
 def test_pages_and_navigation(app, window):
     window.navigate("dash")
     window.navigate("all")
-    window.navigate("subject:777")
+    window.navigate("homework:777")
     window.navigate("kbs:501")
     window.navigate("test:1002")
     app.processEvents()

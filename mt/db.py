@@ -255,11 +255,6 @@ def get_subject(sid: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def rename_subject(sid: int, title: str) -> None:
-    with transaction() as conn:
-        conn.execute("UPDATE subjects SET title = ? WHERE id = ?", (title, sid))
-
-
 # --------------------------------------------------------------------------- #
 # knowledge bases
 # --------------------------------------------------------------------------- #
@@ -573,18 +568,6 @@ def _kbs_rows_with_stats(subject_ids: list[int]) -> list[dict[str, Any]]:
     return rows
 
 
-def subject_lessons(subject_id: int) -> list[dict[str, Any]]:
-    """Lessons that contain this homework, in course order."""
-    rows = get_connection().execute(
-        """
-        SELECT DISTINCT l.* FROM lessons l
-        JOIN lesson_subjects ls ON ls.lesson_id = l.id
-        WHERE ls.subject_id = ?
-        ORDER BY l.course_id, l.position, l.id
-        """,
-        (subject_id,),
-    ).fetchall()
-    return [dict(row) for row in rows]
 
 
 def _homework_select(where: str) -> str:
@@ -653,17 +636,6 @@ def course_homeworks(course_id: int) -> dict[str, Any]:
     }
 
 
-def subject_homeworks(subject_id: int) -> dict[str, Any]:
-    """A homework («домашка» = subject) with its sections and lessons.
-
-    ``sections`` are knowledge bases; ``lessons`` are the lessons of any course
-    that contains this homework.  Kept under the old name because pages use it.
-    """
-    sections = _kbs_rows_with_stats([subject_id])
-    lessons = subject_lessons(subject_id)
-    return {"sections": sections, "lessons": lessons, "orphans": []}
-
-
 def homework_sections(subject_id: int) -> list[dict[str, Any]]:
     """Sections (knowledge bases) of a homework with test counters."""
     return _kbs_rows_with_stats([subject_id])
@@ -710,12 +682,6 @@ def homework_row(subject_id: int) -> dict[str, Any] | None:
     return homework
 
 
-def homework_lesson(subject_id: int) -> dict[str, Any] | None:
-    """The first lesson that contains this homework."""
-    path = subject_course_path(subject_id)
-    return get_lesson(path["lesson_id"]) if path else None
-
-
 def course_lessons_tree(course_id: int | None = None) -> list[tuple[dict[str, Any], list[tuple[dict[str, Any], list[dict[str, Any]]]]]]:
     """Courses → lessons → homeworks, ready for the sidebar."""
     result = []
@@ -760,6 +726,21 @@ def course_subject_ids() -> set[int]:
     return {int(row["subject_id"]) for row in rows}
 
 
+def course_id_for_subject(subject_id: int) -> int | None:
+    """First course whose lesson contains this homework (if any)."""
+    row = get_connection().execute(
+        """
+        SELECT l.course_id AS course_id
+        FROM lesson_subjects ls
+        JOIN lessons l ON l.id = ls.lesson_id
+        WHERE ls.subject_id = ?
+        ORDER BY l.position, l.id LIMIT 1
+        """,
+        (int(subject_id),),
+    ).fetchone()
+    return int(row["course_id"]) if row else None
+
+
 def lesson_id_for_subject(subject_id: int) -> int | None:
     """Entity lesson id of the first course lesson that contains *subject_id*.
 
@@ -787,14 +768,6 @@ def db_course_homeworks_lessons(groups: dict[str, Any]) -> list[tuple[dict[str, 
     return list(groups.get("lessons") or [])
 
 
-def course_tree() -> list[tuple[dict[str, Any], list[tuple[dict[str, Any], list[dict[str, Any]]]]]]:
-    """Courses → lessons → subjects, ready for the sidebar."""
-    return [
-        (course, course_lessons(course["id"]))
-        for course in _course_stat_rows()
-    ]
-
-
 def delete_course(cid: int) -> None:
     """Forget the course structure; cached subjects and tests stay."""
     with transaction() as conn:
@@ -805,13 +778,6 @@ def delete_course(cid: int) -> None:
         )
         conn.execute("DELETE FROM lessons WHERE course_id = ?", (cid,))
         conn.execute("DELETE FROM courses WHERE id = ?", (cid,))
-
-
-def clear_courses() -> None:
-    with transaction() as conn:
-        conn.execute("DELETE FROM lesson_subjects")
-        conn.execute("DELETE FROM lessons")
-        conn.execute("DELETE FROM courses")
 
 
 # --------------------------------------------------------------------------- #

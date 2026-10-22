@@ -343,8 +343,3 @@ class Api:
             ),
         )
 
-    def try_get_courses(self) -> Any | None:
-        try:
-            return self._request("GET", config.ENDPOINTS["courses"])
-        except ApiError:
-            return None

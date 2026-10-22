@@ -4,13 +4,14 @@ The site exposes several entry points, all of which the app accepts as a
 single pasted string:
 
 ``/student/courses/111137/lessons``
-    a course: it expands into lessons → practice blocks → subjects → tests;
+    предмет: раскрывается в уроки → домашки → разделы → задания;
 
 ``/lesson/4772366/subjects/51610/practice/kbs/8931/tests/289165?type=online``
-    a concrete task; ``backPage`` carries the course id, ``type`` the mode;
+    конкретное задание; ``/lesson/<id>`` — это урок (``entity lesson id``),
+    ``?type=`` — режим;
 
-``/subjects/51610/`` and ``/kbs/8931/``
-    a subject / knowledge base.
+``/subjects/51610/`` и ``/kbs/8931/``
+    домашка и её раздел.
 """
 
 from __future__ import annotations
@@ -52,15 +53,6 @@ class ParsedLink:
     @property
     def is_course(self) -> bool:
         return self.kind == "course"
-
-    @property
-    def label(self) -> str:
-        return {
-            "course": "курс",
-            "test": "задание",
-            "subject": "предмет",
-            "kbs": "раздел",
-        }.get(self.kind, self.kind)
 
 
 def _int(value: str | None) -> int | None:
