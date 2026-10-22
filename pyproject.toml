@@ -1,0 +1,9 @@
+[project]
+name = "maximumtest-desktop"
+version = "0.1.0"
+description = "Desktop viewer for MaximumTest homework with local SQLite cache"
+requires-python = ">=3.11"
+dependencies = ["PyQt6>=6.6", "requests>=2.31"]
+
+[project.scripts]
+maximumtest = "mt.__main__:main"
