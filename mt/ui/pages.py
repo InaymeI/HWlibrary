@@ -221,13 +221,17 @@ class PageHeader(QFrame):
         margin = self.layout().contentsMargins()
         available = max(320, self.width() - margin.left() - margin.right())
         badges = self.badge_box.sizeHint().width() if self._badges else 0
+        more_width = self._more_button.sizeHint().width()
         shown = len(buttons)
         while shown > 0:
             buttons_width = sum(
                 widget.sizeHint().width() for widget in buttons[:shown]
             )
-            more = 44 if shown < len(buttons) else 0
-            needed = ElidedLabel.MIN_WIDTH + badges + buttons_width + more + 10 * (shown + 2)
+            more = more_width if shown < len(buttons) else 0
+            gaps = 10 * 3 + 8 * max(0, shown - 1)  # title|badges|stretch|actions
+            needed = (
+                ElidedLabel.MIN_WIDTH + badges + buttons_width + more + gaps
+            )
             if needed <= available:
                 break
             shown -= 1
