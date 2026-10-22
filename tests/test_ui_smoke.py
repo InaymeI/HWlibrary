@@ -491,8 +491,14 @@ def test_light_theme_is_grey_and_selection_looks_glassy(app):
 
     for value in (LIGHT.surface, LIGHT.sidebar, LIGHT.surface_alt):
         assert QColor(value).lightness() < 245, value
+    # the panels are the reference grey; the canvas behind them is darker
+    assert QColor(LIGHT.surface) == QColor("#a8a8a8")
+    assert QColor(LIGHT.surface).lightness() > QColor(LIGHT.bg).lightness()
     # the tint is translucent, so the grey behind it stays visible
-    assert paint_color(LIGHT.glass_top).alpha() < 200
+    assert paint_color(LIGHT.glass_start).alpha() < 200
+    assert paint_color(LIGHT.glass_end).alpha() < 200
+    # and the hairline rim is brighter than the surface it sits on
+    assert paint_color(LIGHT.glass_border).lightness() > QColor(LIGHT.surface).lightness()
 
     assert paint_color("rgba(255, 255, 255, 0.5)").alpha() == 128
     assert paint_color("rgba(1, 2, 3, 0.5)").isValid()

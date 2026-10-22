@@ -133,8 +133,8 @@ class PageHeader(QFrame):
         super().__init__(parent)
         self.setObjectName("pageHeader")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 16, 24, 16)
-        outer.setSpacing(6)
+        outer.setContentsMargins(28, 20, 28, 12)
+        outer.setSpacing(8)
 
         self.breadcrumb = Breadcrumb()
         self.breadcrumb.navigate.connect(self.navigate)
@@ -280,8 +280,8 @@ class ScrollPage(QWidget):
 
         self.content = QWidget()
         self.body = QVBoxLayout(self.content)
-        self.body.setContentsMargins(24, 20, 24, 28)
-        self.body.setSpacing(16)
+        self.body.setContentsMargins(28, 18, 28, 30)
+        self.body.setSpacing(18)
         self.scroll.setWidget(self.content)
         layout.addWidget(self.scroll, 1)
 
@@ -321,8 +321,8 @@ class DashboardPage(ScrollPage):
             (plural(courses, "предмет", "предмета", "предметов"), fmt_int(courses), "book"),
             (plural(homeworks, "домашка", "домашки", "домашек"), fmt_int(homeworks), "homework"),
             (plural(tests, "тест", "теста", "тестов"), fmt_int(tests), "layers"),
-            ("с готовым ответом", fmt_int(stats["supported"]), "check"),
-            ("обновлено", relative_time(stats["updated_at"]), "clock"),
+            ("с ответом", fmt_int(stats["supported"]), "check"),
+            ("обновлено", relative_time(stats["updated_at"]).replace(" назад", ""), "clock"),
         ):
             card = StatCard(caption, value, icon_name)
             card.set_theme(palette)

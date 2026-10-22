@@ -34,91 +34,85 @@ class Palette:
     danger: str
     danger_soft: str
     selection: str
-    shadow: str
     rail: str
     rail_hover: str
     rail_active: str
     on_accent: str
     # «liquid glass»: translucent surfaces for selection and the dark rail
-    glass_top: str
-    glass_bottom: str
+    glass_start: str
+    glass_end: str
     glass_border: str
     glass_highlight: str
-    glass_edge: str
     glass_shadow: str
     rail_shadow: str
 
 
 LIGHT = Palette(
     name="light",
-    bg="#d3d3d7",
-    surface="#ececee",
-    surface_alt="#e3e3e7",
-    sidebar="#e7e7ea",
-    border="#dcdce0",
-    border_strong="#c7c7cd",
-    text="#171719",
-    text_secondary="#4e4e55",
-    muted="#7f7f88",
-    accent="#202022",
-    accent_hover="#343437",
+    bg="#8f8f8f",
+    surface="#a8a8a8",
+    surface_alt="#b2b2b2",
+    sidebar="#a8a8a8",
+    border="rgba(255, 255, 255, 0.48)",
+    border_strong="rgba(255, 255, 255, 0.72)",
+    text="#1a1a1c",
+    text_secondary="#3d3d40",
+    muted="#5e5e62",
+    accent="#1d1d1f",
+    accent_hover="#2e2e31",
     accent_pressed="#000000",
-    accent_soft="#dcdce1",
-    success="#1f6b4d",
-    success_soft="#dcebe3",
-    warning="#8a5a12",
-    warning_soft="#efe4d2",
-    danger="#b23b3b",
-    danger_soft="#eedddd",
-    selection="#e0e0e5",
-    shadow="rgba(0, 0, 0, 0.10)",
-    rail="#1b1b1d",
+    accent_soft="rgba(255, 255, 255, 0.18)",
+    success="#14523a",
+    success_soft="rgba(20, 82, 58, 0.16)",
+    warning="#6d490f",
+    warning_soft="rgba(109, 73, 15, 0.16)",
+    danger="#8c2f2f",
+    danger_soft="rgba(140, 47, 47, 0.16)",
+    selection="rgba(255, 255, 255, 0.42)",
+    rail="#232325",
     rail_hover="rgba(255, 255, 255, 0.10)",
     rail_active="rgba(255, 255, 255, 0.16)",
     on_accent="#ffffff",
-    glass_top="rgba(255, 255, 255, 0.52)",
-    glass_bottom="rgba(255, 255, 255, 0.26)",
-    glass_border="rgba(255, 255, 255, 0.72)",
-    glass_highlight="rgba(255, 255, 255, 0.34)",
-    glass_edge="rgba(24, 24, 30, 0.07)",
-    glass_shadow="rgba(24, 24, 30, 0.16)",
-    rail_shadow="rgba(20, 20, 26, 0.22)",
+    glass_start="rgba(242, 255, 251, 0.12)",
+    glass_end="rgba(242, 255, 251, 0.34)",
+    glass_border="rgba(255, 255, 255, 0.46)",
+    glass_highlight="rgba(255, 255, 255, 0.30)",
+    glass_shadow="rgba(28, 32, 31, 0.22)",
+    rail_shadow="rgba(22, 22, 26, 0.30)",
 )
 
 DARK = Palette(
     name="dark",
-    bg="#0d0d0e",
-    surface="#18181a",
-    surface_alt="#212123",
-    sidebar="#141416",
-    border="#262628",
-    border_strong="#353537",
+    bg="#0e0e0f",
+    surface="#19191a",
+    surface_alt="#232324",
+    sidebar="#19191a",
+    border="rgba(255, 255, 255, 0.10)",
+    border_strong="rgba(255, 255, 255, 0.18)",
     text="#ededed",
-    text_secondary="#b3b3b6",
-    muted="#7e7e83",
+    text_secondary="#b8b8bb",
+    muted="#808085",
     accent="#ededed",
     accent_hover="#ffffff",
     accent_pressed="#d5d5d5",
-    accent_soft="#2a2a2d",
+    accent_soft="rgba(255, 255, 255, 0.10)",
     success="#5fd6a4",
-    success_soft="#152a22",
+    success_soft="rgba(95, 214, 164, 0.16)",
     warning="#e5b264",
-    warning_soft="#2b2316",
+    warning_soft="rgba(229, 178, 100, 0.16)",
     danger="#ff8b8b",
-    danger_soft="#2e1a1a",
-    selection="#26262a",
-    shadow="rgba(0, 0, 0, 0.45)",
-    rail="#08080a",
+    danger_soft="rgba(255, 139, 139, 0.16)",
+    selection="rgba(255, 255, 255, 0.12)",
+    rail="#0b0b0c",
     rail_hover="rgba(255, 255, 255, 0.08)",
     rail_active="rgba(255, 255, 255, 0.14)",
     on_accent="#141414",
-    glass_top="rgba(255, 255, 255, 0.22)",
-    glass_bottom="rgba(255, 255, 255, 0.08)",
+    glass_start="rgba(255, 255, 255, 0.06)",
+    glass_end="rgba(255, 255, 255, 0.16)",
     glass_border="rgba(255, 255, 255, 0.30)",
-    glass_highlight="rgba(255, 255, 255, 0.16)",
-    glass_edge="rgba(0, 0, 0, 0.45)",
+    glass_highlight="rgba(255, 255, 255, 0.12)",
     glass_shadow="rgba(0, 0, 0, 0.55)",
-    rail_shadow="rgba(0, 0, 0, 0.65)",
+    rail_shadow="rgba(0, 0, 0, 0.70)",
 )
 
 PALETTES = {"light": LIGHT, "dark": DARK}
@@ -143,15 +137,26 @@ QWidget#shell { background: $bg; }
 QFrame#rail {
     background: $rail;
     border: none;
-    border-radius: 24px;
+    border-radius: 26px;
 }
 QToolButton#railButton {
     background: transparent;
     border: none;
-    border-radius: 13px;
+    border-radius: 15px;
 }
 QToolButton#railButton { border: 1px solid transparent; }
 QToolButton#railButton:hover { background: $rail_hover; }
+QToolButton#navRow {
+    background: transparent;
+    border: none;
+    border-radius: 12px;
+    padding: 0 12px;
+    color: $text_secondary;
+    font-size: 14px;
+    text-align: left;
+}
+QToolButton#navRow:hover { color: $text; }
+QToolButton#navRow:checked { color: $text; }
 QToolButton#railButton:checked {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 rgba(255, 255, 255, 0.24), stop:1 rgba(255, 255, 255, 0.10));
@@ -162,22 +167,21 @@ QToolButton#railButton:pressed {
         stop:0 rgba(255, 255, 255, 0.28), stop:1 rgba(255, 255, 255, 0.14));
 }
 QToolButton#railLogo {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(255, 255, 255, 0.22), stop:1 rgba(255, 255, 255, 0.08));
-    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: transparent;
+    border: none;
     border-radius: 15px;
 }
 QToolButton#railLogo:hover { background: $rail_hover; }
 
 QFrame#sidePanel {
     background: $sidebar;
-    border: none;
-    border-radius: 22px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 28px;
 }
 QFrame#content {
     background: $surface;
-    border: none;
-    border-radius: 22px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 28px;
 }
 QFrame#content QWidget#pageBody { background: transparent; }
 
@@ -246,17 +250,17 @@ QStatusBar {
     background: transparent;
     border: none;
     color: $muted;
-    padding: 2px 18px 8px 18px;
+    padding: 0 22px 6px 22px;
 }
 QStatusBar::item { border: none; }
 
 /* ---------------- buttons ---------------- */
 QPushButton {
-    background: $surface;
+    background: $surface_alt;
     color: $text;
-    border: 1px solid $border_strong;
-    border-radius: 10px;
-    padding: 8px 15px;
+    border: 1px solid $border;
+    border-radius: 13px;
+    padding: 9px 16px;
     font-weight: 500;
     min-height: 18px;
 }
@@ -317,10 +321,10 @@ QToolButton:checked { background: $accent_soft; border-color: transparent; }
 
 /* ---------------- inputs ---------------- */
 QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QComboBox, QSpinBox {
-    background: $surface_alt;
-    border: 1px solid $border_strong;
-    border-radius: 8px;
-    padding: 7px 10px;
+    background: $accent_soft;
+    border: 1px solid $border;
+    border-radius: 12px;
+    padding: 8px 12px;
     selection-background-color: $accent;
     selection-color: $on_accent;
 }
@@ -379,13 +383,14 @@ QTreeWidget#sidebar {
     padding: 2px 6px;
     show-decoration-selected: 0;
     outline: 0;
+    font-size: 14px;
 }
 QTreeWidget#sidebar::item {
-    height: 32px;
-    border-radius: 9px;
+    height: 38px;
+    border-radius: 12px;
     color: $text_secondary;
     padding-left: 6px;
-    margin: 1px 0;
+    margin: 2px 0;
 }
 /* The row background is a glass pill painted by SidebarTree (drawBranches),
    so the style must keep the item and branch strips transparent — otherwise
@@ -410,8 +415,7 @@ QTableWidget, QTableView, QListWidget {
 }
 QTableWidget::item, QListWidget::item { padding: 6px 8px; border: none; }
 QTableWidget::item:selected, QListWidget::item:selected {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 $glass_top, stop:1 $glass_bottom);
+    background: $accent_soft;
     color: $text;
 }
 QHeaderView::section {
@@ -428,8 +432,8 @@ QTableCornerButton::section { background: $surface_alt; border: none; }
 /* ---------------- cards / labels ---------------- */
 QFrame#card {
     background: $surface_alt;
-    border: 1px solid transparent;
-    border-radius: 18px;
+    border: none;
+    border-radius: 20px;
 }
 QFrame#card[clickable="true"]:hover { background: $selection; }
 QFrame#cardFlat {
@@ -447,14 +451,14 @@ QFrame#sidebarHeader, QFrame#sidebarFooter {
 }
 QFrame#sidebarFooter { border-top: 1px solid $border; }
 
-QLabel[role="h1"] { font-size: 27px; font-weight: 700; color: $text; }
-QLabel[role="h2"] { font-size: 16px; font-weight: 600; color: $text; }
-QLabel[role="h3"] { font-size: 13px; font-weight: 600; color: $text; }
-QLabel[role="muted"] { color: $muted; }
+QLabel[role="h1"] { font-size: 34px; font-weight: 600; color: $text; }
+QLabel[role="h2"] { font-size: 17px; font-weight: 600; color: $text; }
+QLabel[role="h3"] { font-size: 14px; font-weight: 600; color: $text; }
+QLabel[role="muted"] { color: $muted; font-size: 13px; }
 QLabel[role="secondary"] { color: $text_secondary; }
 QLabel[role="accent"] { color: $accent; font-weight: 600; }
-QLabel[role="stat"] { font-size: 30px; font-weight: 700; color: $text; }
-QLabel[role="statSmall"] { font-size: 19px; font-weight: 600; color: $text; margin-bottom: 8px; }
+QLabel[role="stat"] { font-size: 40px; font-weight: 700; color: $text; }
+QLabel[role="statSmall"] { font-size: 24px; font-weight: 600; color: $text; }
 QLabel[role="mono"] { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; color: $text_secondary; }
 QLabel[role="badge"] {
     background: $surface_alt;

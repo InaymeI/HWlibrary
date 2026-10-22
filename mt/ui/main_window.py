@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,13 @@ from typing import Any
 from PyQt6 import sip
 from PyQt6.QtCore import (
     QModelIndex,
+    QPoint,
+    QPointF,
     QRect,
+    QRectF,
     QSettings,
     QSize,
+    QSizeF,
     Qt,
     QTimer,
     pyqtSignal,
@@ -31,6 +36,7 @@ from PyQt6.QtGui import (
     QLinearGradient,
     QPainter,
     QPixmap,
+    QRadialGradient,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -47,6 +53,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -124,6 +131,8 @@ class SidebarTree(QTreeWidget):
         option.state &= ~QStyle.StateFlag.State_Selected
         super().drawRow(painter, option, index)
 
+    ROW_HEIGHT = 40
+
     def _paint_pill(self, painter: QPainter, index) -> None:
         selected = self.currentIndex() == index
         hovered = index == self._hover_index
@@ -134,8 +143,8 @@ class SidebarTree(QTreeWidget):
             return
         pill = QRect(2, row.top() + 2, self.viewport().width() - 8, row.height() - 4)
         paint_glass(
-            painter, pill, self._palette, radius=10,
-            strength=1.0 if selected else 0.5,
+            painter, pill, self._palette, radius=12,
+            strength=1.0 if selected else 0.45,
         )
 
     # ------------------------------------------------------------------ #
@@ -215,14 +224,16 @@ class SidebarDelegate(QStyledItemDelegate):
     def __init__(self, tree: QTreeWidget) -> None:
         super().__init__(tree)
         self._tree = tree
-        self._text = "#141414"
-        self._secondary = "#575757"
-        self._muted = "#8c8c8c"
+        self._text = "#1a1a1c"
+        self._secondary = "#3d3d40"
+        self._muted = "#5e5e62"
+        self._chip = "rgba(255, 255, 255, 0.30)"
 
     def set_palette(self, palette: Palette) -> None:
         self._text = palette.text
         self._secondary = palette.text_secondary
         self._muted = palette.muted
+        self._chip = palette.selection
         self._tree.viewport().update()
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
@@ -240,18 +251,23 @@ class SidebarDelegate(QStyledItemDelegate):
 
         count = str(index.data(COUNT_ROLE) or "")
         if count:
-            metrics = QFontMetrics(font)
-            count_width = metrics.horizontalAdvance(count)
-            count_rect = label_rect.adjusted(
-                label_rect.width() - count_width, 0, 0, 0
+            chip_font = QFont(font)
+            chip_font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+            chip_width = max(24, QFontMetrics(chip_font).horizontalAdvance(count) + 15)
+            chip = QRectF(
+                label_rect.right() - chip_width + 1.0,
+                rect.center().y() - 11.0,
+                float(chip_width),
+                22.0,
             )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(paint_color(self._chip))
+            painter.drawRoundedRect(chip, 11.0, 11.0)
+            painter.setFont(chip_font)
             painter.setPen(QColor(self._secondary if selected else self._muted))
-            painter.drawText(
-                count_rect,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                count,
-            )
-            label_rect.setRight(count_rect.left() - 8)
+            painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, count)
+            painter.setFont(font)
+            label_rect.setRight(int(chip.left()) - 9)
 
         brush = index.data(Qt.ItemDataRole.ForegroundRole)
         if selected:
@@ -271,9 +287,54 @@ class SidebarDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
-        return QSize(0, 30)
+        return QSize(0, SidebarTree.ROW_HEIGHT)
 
 
+
+
+class NavRow(QToolButton):
+    """Sidebar row with the liquid-glass pill painted behind icon and text."""
+
+    def __init__(self, text: str, icon_name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("navRow")
+        self.setText(text)
+        self.setIconSize(QSize(18, 18))
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(44)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._icon_name = icon_name
+        self._palette: Palette = PALETTES["light"]
+        self.setIcon(icons.icon(icon_name, self._palette.text_secondary, 18))
+
+    def set_palette(self, palette: Palette) -> None:
+        self._palette = palette
+        self._refresh_icon()
+        self.update()
+
+    def setChecked(self, checked: bool) -> None:  # noqa: N802 - Qt API
+        super().setChecked(checked)
+        self._refresh_icon()
+
+    def _refresh_icon(self) -> None:
+        color = self._palette.text if self.isChecked() else self._palette.text_secondary
+        self.setIcon(icons.icon(self._icon_name, color, 18))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self.isChecked() or self.underMouse():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            paint_glass(
+                painter,
+                self.rect().adjusted(0, 4, 0, -4),
+                self._palette,
+                radius=13,
+                strength=1.0 if self.isChecked() else 0.45,
+            )
+            painter.end()
+        super().paintEvent(event)
 
 
 class Sidebar(QWidget):
@@ -296,10 +357,10 @@ class Sidebar(QWidget):
         header = QFrame()
         header.setObjectName("sidebarHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 18, 16, 8)
+        header_layout.setContentsMargins(22, 20, 20, 10)
         header_layout.setSpacing(10)
         brand_box = QVBoxLayout()
-        brand_box.setSpacing(1)
+        brand_box.setSpacing(2)
         brand_box.addWidget(label("MaximumTest", "h2"))
         brand_box.addWidget(label("локальный кэш заданий", "muted"))
         header_layout.addLayout(brand_box, 1)
@@ -307,7 +368,7 @@ class Sidebar(QWidget):
 
         search_box = QWidget()
         search_layout = QHBoxLayout(search_box)
-        search_layout.setContentsMargins(14, 2, 14, 6)
+        search_layout.setContentsMargins(18, 2, 18, 10)
         self.search = QLineEdit()
         self.search.setObjectName("sidebarSearch")
         self.search.setPlaceholderText("Поиск по заданиям…")
@@ -316,16 +377,32 @@ class Sidebar(QWidget):
         search_layout.addWidget(self.search)
         layout.addWidget(search_box)
 
+        nav = QWidget()
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(14, 0, 14, 8)
+        nav_layout.setSpacing(2)
+        self._nav_rows: dict[str, NavRow] = {}
+        for key, title, icon_name in (
+            ("dash", "Обзор", "grid"),
+            ("courses", "Предметы", "book"),
+            ("all", "Все тесты", "layers"),
+        ):
+            row = NavRow(title, icon_name)
+            row.clicked.connect(lambda _checked=False, target=key: self.main.navigate(target))
+            nav_layout.addWidget(row)
+            self._nav_rows[key] = row
+        layout.addWidget(nav)
+
         section = QWidget()
         section_layout = QHBoxLayout(section)
-        section_layout.setContentsMargins(12, 6, 12, 2)
+        section_layout.setContentsMargins(20, 6, 18, 2)
         section_layout.setSpacing(4)
         self.section_label = QToolButton()
         self.section_label.setObjectName("sectionToggle")
         self.section_label.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
-        self.section_label.setText("ПРЕДМЕТЫ")
+        self.section_label.setText("Предметы")
         self.section_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.section_label.setToolTip(
             "Скрыть или показать весь список (Ctrl+B). "
@@ -347,7 +424,7 @@ class Sidebar(QWidget):
         self.tree.setItemDelegate(SidebarDelegate(self.tree))
         self.tree.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.tree.setMouseTracking(True)
-        self.tree.setIndentation(SidebarTree.CHEVRON + 2)
+        self.tree.setIndentation(SidebarTree.CHEVRON + 4)
         self.tree.setAnimated(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -367,7 +444,7 @@ class Sidebar(QWidget):
         footer = QFrame()
         footer.setObjectName("sidebarFooter")
         footer_layout = QVBoxLayout(footer)
-        footer_layout.setContentsMargins(18, 10, 16, 12)
+        footer_layout.setContentsMargins(20, 12, 18, 14)
         footer_layout.setSpacing(2)
         self.cookie_badge = Badge("cookies не заданы", "danger")
         self.cookie_badge.setToolTip("Cookies нужны для доступа к заданиям")
@@ -384,10 +461,22 @@ class Sidebar(QWidget):
 
     # ------------------------------------------------------------------ #
     def highlight(self, page: str) -> None:
-        """Kept for compatibility: the icon rail owns the section highlight."""
+        """Mirror the current page in the rail and the sidebar rows."""
         rail = getattr(self.main, "rail", None)
         if rail is not None:
             rail.set_active(page)
+        active = {
+            "dash": "dash",
+            "all": "all",
+            "courses": "courses",
+            "course": "courses",
+            "lesson": "courses",
+            "homework": "courses",
+            "kbs": "courses",
+            "test": "courses",
+        }.get(page, "")
+        for key, row in self._nav_rows.items():
+            row.setChecked(key == active)
 
     # ------------------------------------------------------------------ #
     def toggle_section(self, collapsed: bool | None = None) -> None:
@@ -452,9 +541,11 @@ class Sidebar(QWidget):
             delegate.set_palette(palette)
         self.tree.set_branch_color(palette.muted)
         self.tree.set_glass_palette(palette)
+        for row in self._nav_rows.values():
+            row.set_palette(palette)
         self.tree.blockSignals(True)
         self.tree.clear()
-        self.section_label.setText("ПРЕДМЕТЫ")
+        self.section_label.setText("Предметы")
 
         def add_section(parent: QTreeWidgetItem, section: dict[str, Any]) -> None:
             total = int(section.get("total") or 0)
@@ -600,6 +691,11 @@ class Sidebar(QWidget):
             self.tree.setCurrentItem(target)
             self.tree.scrollToItem(target)
         self.tree.blockSignals(False)
+        if target is not None:
+            # the pill is already on the tree row; a second one in the nav
+            # above would read as two current pages
+            for row in self._nav_rows.values():
+                row.setChecked(False)
 
     def clear_selection(self) -> None:
         self.tree.blockSignals(True)
@@ -681,6 +777,108 @@ RAIL_ICON_IDLE = "#c3c3c8"
 RAIL_ICON_ACTIVE = "#ffffff"
 
 
+class Shell(QWidget):
+    """Canvas the panels float on: flat grey plus a soft corner vignette.
+
+    The reference design lights the middle of the window and lets the corners
+    fall into shade, so the grey panels read as sheets of glass lying on top.
+    """
+
+    DEPTH = 22
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._palette: Palette = PALETTES["light"]
+        self._panels: list[QRectF] = []
+
+    def set_palette(self, palette: Palette) -> None:
+        self._palette = palette
+        self.update()
+
+    def set_panels(self, panels: list[QRectF]) -> None:
+        """Rects of the floating panels; the canvas paints their shadows."""
+        self._panels = panels
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+        painter.fillRect(rect, paint_color(self._palette.bg))
+
+        center = QPointF(rect.width() * 0.46, rect.height() * 0.40)
+        corner = math.hypot(
+            max(center.x(), rect.width() - center.x()),
+            max(center.y(), rect.height() - center.y()),
+        )
+        if corner <= 0:
+            return
+        clear = QColor(0, 0, 0, 0)
+        shade = paint_color(self._palette.rail_shadow)
+        shade.setAlphaF(min(1.0, shade.alphaF()))
+        vignette = QRadialGradient(center, corner)
+        vignette.setColorAt(0.0, clear)
+        vignette.setColorAt(0.55, clear)
+        vignette.setColorAt(1.0, shade)
+        painter.fillRect(rect, vignette)
+        for panel in self._panels:
+            self._paint_shadow(painter, panel)
+
+
+    def _paint_shadow(self, painter: QPainter, panel: QRectF) -> None:
+        """Soft shadow under one panel: four gradient bands plus corners."""
+        depth = float(self.DEPTH)
+        radius = 26.0
+        edge = paint_color(self._palette.rail_shadow)
+        edge.setAlphaF(min(1.0, edge.alphaF() * 0.55))
+        clear = QColor(edge)
+        clear.setAlphaF(0.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        def band(rect: QRectF, gradient: QLinearGradient) -> None:
+            painter.setBrush(gradient)
+            painter.drawRect(rect)
+
+        left = QRectF(panel.left() - depth, panel.top() + radius, depth,
+                      panel.height() - 2 * radius)
+        horizontal = QLinearGradient(left.topLeft(), left.topRight())
+        horizontal.setColorAt(0.0, clear)
+        horizontal.setColorAt(1.0, edge)
+        band(left, horizontal)
+
+        right = QRectF(panel.right(), panel.top() + radius, depth,
+                       panel.height() - 2 * radius)
+        horizontal = QLinearGradient(right.topLeft(), right.topRight())
+        horizontal.setColorAt(0.0, edge)
+        horizontal.setColorAt(1.0, clear)
+        band(right, horizontal)
+
+        top = QRectF(panel.left() + radius, panel.top() - depth,
+                     panel.width() - 2 * radius, depth)
+        vertical = QLinearGradient(top.topLeft(), top.bottomLeft())
+        vertical.setColorAt(0.0, clear)
+        vertical.setColorAt(1.0, edge)
+        band(top, vertical)
+
+        bottom = QRectF(panel.left() + radius, panel.bottom(),
+                        panel.width() - 2 * radius, depth + 4.0)
+        vertical = QLinearGradient(bottom.topLeft(), bottom.bottomLeft())
+        vertical.setColorAt(0.0, edge)
+        vertical.setColorAt(1.0, clear)
+        band(bottom, vertical)
+
+        for cx, cy in ((panel.left(), panel.top()),
+                       (panel.right(), panel.top()),
+                       (panel.left(), panel.bottom()),
+                       (panel.right(), panel.bottom())):
+            corner = QRadialGradient(QPointF(cx, cy), radius + depth)
+            corner.setColorAt(radius / (radius + depth), edge)
+            corner.setColorAt(1.0, clear)
+            painter.setBrush(corner)
+            painter.drawRect(QRectF(cx - radius - depth, cy - radius - depth,
+                                    (radius + depth) * 2, (radius + depth) * 2))
+
+
 class RailShadow(QWidget):
     """Soft shadow the floating rail casts onto the grey canvas.
 
@@ -690,8 +888,8 @@ class RailShadow(QWidget):
     masked by a vertical one, so it fades out at the top and bottom corners.
     """
 
-    WIDTH = 14
-    RADIUS = 24.0
+    WIDTH = 16
+    RADIUS = 26.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -764,18 +962,18 @@ class Rail(QFrame):
         super().__init__()
         self.main = main
         self.setObjectName("rail")
-        self.setFixedWidth(68)
+        self.setFixedWidth(72)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 14, 12, 14)
+        layout.setContentsMargins(13, 16, 13, 16)
         layout.setSpacing(4)
         self._nav: dict[str, QToolButton] = {}
         self._bound: list[tuple[QToolButton, QAction, str]] = []
 
         self.logo = QToolButton()
         self.logo.setObjectName("railLogo")
-        self.logo.setFixedSize(44, 44)
-        self.logo.setIconSize(QSize(22, 22))
-        self.logo.setIcon(icons.icon(APP_ICON, "#ffffff", 22))
+        self.logo.setFixedSize(46, 46)
+        self.logo.setIconSize(QSize(26, 26))
+        self.logo.setIcon(icons.icon(APP_ICON, "#ffffff", 26))
         self.logo.setToolTip(config.APP_TITLE)
         self.logo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.logo.clicked.connect(lambda: self.navigate.emit("dash"))
@@ -799,9 +997,9 @@ class Rail(QFrame):
 
         self.theme_button = QToolButton()
         self.theme_button.setObjectName("railButton")
-        self.theme_button.setFixedSize(44, 44)
-        self.theme_button.setIconSize(QSize(20, 20))
-        self.theme_button.setIcon(icons.icon("moon", RAIL_ICON_IDLE, 20))
+        self.theme_button.setFixedSize(46, 46)
+        self.theme_button.setIconSize(QSize(21, 21))
+        self.theme_button.setIcon(icons.icon("moon", RAIL_ICON_IDLE, 21))
         self.theme_button.setToolTip("Переключить тему")
         self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.theme_button.clicked.connect(main.toggle_theme)
@@ -809,9 +1007,9 @@ class Rail(QFrame):
 
         self.settings_button = QToolButton()
         self.settings_button.setObjectName("railButton")
-        self.settings_button.setFixedSize(44, 44)
-        self.settings_button.setIconSize(QSize(20, 20))
-        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 20))
+        self.settings_button.setFixedSize(46, 46)
+        self.settings_button.setIconSize(QSize(21, 21))
+        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 21))
         self.settings_button.setToolTip("Настройки и журнал")
         self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -821,9 +1019,9 @@ class Rail(QFrame):
     def _nav_button(self, icon_name: str, key: str, tooltip: str) -> QToolButton:
         button = QToolButton()
         button.setObjectName("railButton")
-        button.setFixedSize(44, 44)
-        button.setIconSize(QSize(20, 20))
-        button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 20))
+        button.setFixedSize(46, 46)
+        button.setIconSize(QSize(21, 21))
+        button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 21))
         button.setToolTip(tooltip)
         button.setCheckable(True)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -834,9 +1032,9 @@ class Rail(QFrame):
     def _action_button(self, action: QAction, icon_name: str) -> QToolButton:
         button = QToolButton()
         button.setObjectName("railButton")
-        button.setFixedSize(44, 44)
-        button.setIconSize(QSize(20, 20))
-        button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 20))
+        button.setFixedSize(46, 46)
+        button.setIconSize(QSize(21, 21))
+        button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 21))
         button.setToolTip(action.text().rstrip("…"))
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setEnabled(action.isEnabled())
@@ -859,15 +1057,15 @@ class Rail(QFrame):
     def restyle(self, dark: bool) -> None:
         """Keep the rail legible: it stays dark in both themes."""
         for button, _action, icon_name in self._bound:
-            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 20))
+            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 21))
         for key, button in self._nav.items():
             active = button.isChecked()
             color = RAIL_ICON_ACTIVE if active else RAIL_ICON_IDLE
             button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
         self.theme_button.setIcon(
-            icons.icon("sun" if dark else "moon", RAIL_ICON_IDLE, 20)
+            icons.icon("sun" if dark else "moon", RAIL_ICON_IDLE, 21)
         )
-        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 20))
+        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 21))
 
 
 _NAV_ICONS = {"dash": "grid", "courses": "book", "all": "layers"}
@@ -1013,11 +1211,12 @@ class MainWindow(QMainWindow):
         self.main_menu = menu
 
     def _build_ui(self) -> None:
-        shell = QWidget()
-        shell.setObjectName("shell")
+        self.shell = Shell()
+        self.shell.setObjectName("shell")
+        shell = self.shell
         outer = QHBoxLayout(shell)
-        outer.setContentsMargins(14, 14, 14, 2)
-        outer.setSpacing(10)
+        outer.setContentsMargins(18, 18, 18, 4)
+        outer.setSpacing(12)
 
         self.rail = Rail(self)
         self.rail.navigate.connect(self.navigate)
@@ -1034,10 +1233,11 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")
         self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(10)
+        self.splitter.setHandleWidth(14)
 
         panel = QFrame()
         panel.setObjectName("sidePanel")
+        self.side_panel = panel
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(0)
@@ -1048,6 +1248,7 @@ class MainWindow(QMainWindow):
 
         content = QFrame()
         content.setObjectName("content")
+        self.content_panel = content
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
@@ -1071,6 +1272,7 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([300, 1040])
+        self.splitter.splitterMoved.connect(lambda *_: self._update_canvas())
         outer.addWidget(self.splitter, 1)
         self.setCentralWidget(shell)
 
@@ -1086,6 +1288,21 @@ class MainWindow(QMainWindow):
         self.log_dock.setVisible(False)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.visibilityChanged.connect(self.act_log.setChecked)
+
+    def _update_canvas(self) -> None:
+        """Tell the canvas where the panels are so it can paint their shadows."""
+        panels = []
+        for widget in (getattr(self, "side_panel", None),
+                       getattr(self, "content_panel", None)):
+            if widget is None:
+                continue
+            origin = widget.mapTo(self.shell, QPoint(0, 0))
+            panels.append(QRectF(QPointF(origin), QSizeF(widget.size())))
+        self.shell.set_panels(panels)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._update_canvas)
 
     def _build_statusbar(self) -> None:
         status = QStatusBar()
@@ -1149,6 +1366,7 @@ class MainWindow(QMainWindow):
         ICONS.recolor(self._pal)
         self.rail.restyle(dark=resolved == "dark")
         self.rail_shadow.set_theme(self._pal)
+        self.shell.set_palette(self._pal)
         self.dashboard_page.apply_theme(self._pal)
         self.courses_page.apply_theme(self._pal)
         self.course_page.apply_theme(self._pal)

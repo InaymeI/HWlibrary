@@ -7,8 +7,9 @@ import weakref
 from collections.abc import Iterable
 
 from PyQt6 import sip
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
+    QBrush,
     QColor,
     QCursor,
     QFont,
@@ -90,14 +91,17 @@ class StatCard(QFrame):
         self._color = color
         self._icon_name = icon_name
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(15, 13, 15, 13)
+        layout.setSpacing(10)
 
         text_box = QVBoxLayout()
         text_box.setSpacing(2)
-        self.value_label = label(value, "stat")
+        # both labels elide instead of forcing the row wider than the page
+        self.value_label = ElidedLabel(value, min_width=36, max_width=240)
+        self.value_label.setProperty("role", "stat")
         self._apply_value_role(value)
-        self.caption_label = label(caption, "muted")
+        self.caption_label = ElidedLabel(caption, min_width=44, max_width=220)
+        self.caption_label.setProperty("role", "muted")
         text_box.addWidget(self.value_label)
         text_box.addWidget(self.caption_label)
         layout.addLayout(text_box, 1)
@@ -105,10 +109,16 @@ class StatCard(QFrame):
         self._icon_label: QLabel | None = None
         if icon_name:
             self._icon_label = QLabel()
-            self._icon_label.setFixedSize(38, 38)
+            self._icon_label.setFixedSize(36, 36)
             self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignTop)
         self.set_theme(None)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        # five cards in one row get narrow: the icon goes first, the values stay
+        if self._icon_label is not None:
+            self._icon_label.setVisible(self.width() >= 190)
 
     def _apply_value_role(self, value: str) -> None:
         """Long values («только что») shrink so all cards keep the same rhythm."""
@@ -124,9 +134,9 @@ class StatCard(QFrame):
             return
         color = self._color or (palette.accent if palette else "#4a63dd")
         soft = palette.accent_soft if palette else "#eceffe"
-        self._icon_label.setPixmap(icons.pixmap(self._icon_name, color, 20))
+        self._icon_label.setPixmap(icons.pixmap(self._icon_name, color, 19))
         self._icon_label.setStyleSheet(
-            f"background: {soft}; border-radius: 10px;"
+            f"background: {soft}; border-radius: 12px;"
         )
 
 
@@ -152,15 +162,16 @@ def paint_glass(
     rect: QRect,
     palette: Palette,
     *,
-    radius: int = 10,
+    radius: int = 12,
     strength: float = 1.0,
 ) -> None:
-    """Liquid-glass pill: soft shadow, translucent body, specular top, rim.
+    """Liquid-glass pill: soft shadow, milky body and a bright hairline rim.
 
-    Qt cannot blur what is *behind* a widget, so the effect is built from the
-    ingredients a frosted surface shows on screen: a translucent vertical
-    gradient over the grey panel, a bright top highlight, a hairline rim and a
-    soft ambient shadow underneath.  ``strength`` < 1 fades it down for hover.
+    Qt cannot blur what is *behind* a widget, so the surface is built from what
+    glass actually shows on screen: an almost clear left side that turns milky
+    towards the right, a specular line along the top edge and a rim that stays
+    bright on top and fades at the bottom.  ``strength`` < 1 fades it down for
+    hover.
     """
     box = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
     if box.isEmpty():
@@ -171,75 +182,64 @@ def paint_glass(
     body_path = QPainterPath()
     body_path.addRoundedRect(box, radius, radius)
 
-    # the shadow must stay *outside* the pill, otherwise it greys the glass
+    # ambient shadow, strictly outside the body so it cannot grey the glass
     shade = paint_color(palette.glass_shadow)
     painter.save()
     outside = QPainterPath()
-    outside.addRect(box.adjusted(-6.0, -6.0, 6.0, 8.0))
+    outside.addRect(box.adjusted(-9.0, -9.0, 9.0, 11.0))
     painter.setClipPath(outside.subtracted(body_path))
-    for spread, factor in ((3.0, 0.35), (2.0, 0.55), (1.0, 0.85)):
+    painter.setPen(Qt.PenStyle.NoPen)
+    for spread, factor in ((5.0, 0.06), (3.2, 0.10), (1.6, 0.16)):
         shadow = QColor(shade)
         shadow.setAlphaF(min(1.0, shade.alphaF() * factor * strength))
-        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(shadow)
         painter.drawRoundedRect(
-            box.adjusted(-spread, -spread + 1.0, spread, spread + 1.0),
+            box.adjusted(-spread, -spread + 1.5, spread, spread + 2.0),
             radius + spread,
             radius + spread,
         )
     painter.restore()
 
-    top = paint_color(palette.glass_top)
-    bottom = paint_color(palette.glass_bottom)
-    top.setAlphaF(top.alphaF() * strength)
-    bottom.setAlphaF(bottom.alphaF() * strength)
-    body = QLinearGradient(box.topLeft(), box.bottomLeft())
-    body.setColorAt(0.0, top)
-    body.setColorAt(1.0, bottom)
+    # body: clearer on the left, milky on the right, with a cool tint
+    start = paint_color(palette.glass_start)
+    end = paint_color(palette.glass_end)
+    start.setAlphaF(start.alphaF() * strength)
+    end.setAlphaF(end.alphaF() * strength)
+    body = QLinearGradient(box.topLeft(), box.topRight())
+    body.setColorAt(0.0, start)
+    body.setColorAt(1.0, end)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(body)
-    painter.drawRoundedRect(box, radius, radius)
+    painter.drawPath(body_path)
 
-    # lens: light bends in over the top edge and the bottom falls into shade
-    painter.setClipPath(body_path)
-    highlight = paint_color(palette.glass_highlight)
-    highlight.setAlphaF(highlight.alphaF() * strength)
-    glow = QLinearGradient(
-        box.topLeft(), QPointF(box.left(), box.top() + box.height() * 0.45)
-    )
-    glow.setColorAt(0.0, highlight)
-    clear = QColor(highlight)
+    # light pools towards the bottom edge
+    sheen = paint_color(palette.glass_highlight)
+    sheen.setAlphaF(sheen.alphaF() * strength * 0.7)
+    clear = QColor(Qt.GlobalColor.white)
     clear.setAlphaF(0.0)
-    glow.setColorAt(1.0, clear)
-    painter.setBrush(glow)
-    painter.drawRect(box)
-
-    edge = paint_color(palette.glass_edge)
-    edge.setAlphaF(edge.alphaF() * strength)
-    falloff = QLinearGradient(
-        QPointF(box.left(), box.bottom() - box.height() * 0.40), box.bottomLeft()
-    )
-    falloff.setColorAt(0.0, QColor(edge.red(), edge.green(), edge.blue(), 0))
-    falloff.setColorAt(1.0, edge)
-    painter.setBrush(falloff)
-    painter.drawRect(box)
-    painter.setClipping(False)
-
-    # hairline rim, brighter where the light hits (top half)
-    rim = paint_color(palette.glass_border)
-    rim.setAlphaF(rim.alphaF() * strength * 0.55)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.setPen(QPen(rim, 1.0))
-    painter.drawRoundedRect(box, radius, radius)
     painter.save()
-    painter.setClipRect(
-        QRectF(box.left(), box.top(), box.width(), box.height() / 2)
-    )
-    lit = paint_color(palette.glass_border)
-    lit.setAlphaF(lit.alphaF() * strength)
-    painter.setPen(QPen(lit, 1.0))
-    painter.drawRoundedRect(box, radius, radius)
+    painter.setClipPath(body_path)
+    lens = QLinearGradient(box.topLeft(), box.bottomLeft())
+    lens.setColorAt(0.0, clear)
+    lens.setColorAt(0.55, clear)
+    lens.setColorAt(1.0, sheen)
+    painter.setBrush(lens)
+    painter.drawRect(box)
     painter.restore()
+
+    # hairline rim: bright at the top, softer at the bottom
+    rim = paint_color(palette.glass_border)
+    light = QColor(rim)
+    light.setAlphaF(min(1.0, rim.alphaF() * strength))
+    dim = QColor(rim)
+    dim.setAlphaF(min(1.0, rim.alphaF() * 0.45 * strength))
+    rim_gradient = QLinearGradient(box.topLeft(), box.bottomLeft())
+    rim_gradient.setColorAt(0.0, light)
+    rim_gradient.setColorAt(0.5, light)
+    rim_gradient.setColorAt(1.0, dim)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QBrush(rim_gradient), 1.0))
+    painter.drawRoundedRect(box, radius, radius)
     painter.restore()
 
 
@@ -269,24 +269,33 @@ class ElidedLabel(QLabel):
     MAX_WIDTH = 720
     MIN_WIDTH = 140
 
-    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        text: str = "",
+        parent: QWidget | None = None,
+        *,
+        min_width: int = MIN_WIDTH,
+        max_width: int = MAX_WIDTH,
+    ) -> None:
         super().__init__(text, parent)
         self._full = text
+        self._min_width = min_width
+        self._max_width = max_width
         # Ask for the width of the whole text (so it is never cut when there is
-        # room) but never push the header buttons: the layout caps the width at
-        # MAX_WIDTH, and eliding keeps it readable down to MIN_WIDTH.
+        # room) but never push the neighbours: the layout caps the width at
+        # ``max_width``, and eliding keeps it readable down to ``min_width``.
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        self.setMinimumWidth(self.MIN_WIDTH)
-        self.setMaximumWidth(self.MAX_WIDTH)
+        self.setMinimumWidth(min_width)
+        self.setMaximumWidth(max_width)
 
     def sizeHint(self):  # noqa: N802 - Qt API
         self.ensurePolished()  # the QSS font size is known only after this
         metrics = QFontMetrics(self.font())
-        width = min(metrics.horizontalAdvance(self._full) + 4, self.MAX_WIDTH)
-        return QSize(max(width, self.MIN_WIDTH), super().sizeHint().height())
+        width = min(metrics.horizontalAdvance(self._full) + 4, self._max_width)
+        return QSize(max(width, self._min_width), super().sizeHint().height())
 
     def minimumSizeHint(self):  # noqa: N802 - Qt API
-        return QSize(self.MIN_WIDTH, super().minimumSizeHint().height())
+        return QSize(self._min_width, super().minimumSizeHint().height())
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         self._full = text
@@ -441,17 +450,17 @@ class AutoHeightTextBrowser(QTextBrowser):
 
 
 class SectionTitle(QWidget):
-    """Small uppercase heading above a group of rows."""
+    """Quiet heading above a group of rows."""
 
     def __init__(self, text: str, count: int | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 8, 2, 0)
+        layout.setContentsMargins(2, 12, 2, 0)
         layout.setSpacing(8)
-        title = QLabel(text.upper())
+        title = QLabel(text)
         font = QFont(title.font())
-        font.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
-        font.setBold(True)
+        font.setPointSizeF(max(8.0, font.pointSizeF() + 0.5))
+        font.setWeight(QFont.Weight.DemiBold)
         title.setFont(font)
         title.setProperty("role", "muted")
         layout.addWidget(title)
