@@ -270,7 +270,7 @@ def test_sync_pipeline_end_to_end(temp_db, monkeypatch):
     )
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-test.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     with FakeServer() as server:
         monkeypatch.setattr(config, "BASE_URL", server.base_url)
@@ -322,7 +322,7 @@ def test_sync_without_cookies_reports_auth_error(temp_db, monkeypatch):
     from tests.fake_server import SUBJECT_ID, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-test2.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     with FakeServer() as server:
         monkeypatch.setattr(config, "BASE_URL", server.base_url)
@@ -411,7 +411,7 @@ def test_sync_result_reports_failed_subject(temp_db, monkeypatch):
     from mt.sync import SyncThread
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-test3.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     db.upsert_subject(777, "Старое имя", {"title": "Старое имя"})
     db.upsert_kbs(501, 777, "online", "Раздел", 1)
@@ -444,7 +444,7 @@ def test_empty_tests_response_does_not_wipe_cache(temp_db, monkeypatch):
     from tests.fake_server import KBS_ONLINE, SUBJECT_ID, TESTS_ONLINE, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-empty.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     with FakeServer() as server:
         monkeypatch.setattr(config, "BASE_URL", server.base_url)
@@ -479,7 +479,7 @@ def test_non_array_tests_payload_falls_back_to_another_mode(temp_db, monkeypatch
     from tests.fake_server import KBS_OFFLINE, SUBJECT_ID, TESTS_OFFLINE, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-mode.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
     monkeypatch.setattr(config, "MODES", ("online", "offline", "aftertheory"))
 
     with FakeServer() as server:
@@ -603,7 +603,7 @@ def test_empty_subject_payload_does_not_overwrite_cache(temp_db, monkeypatch):
     from tests.fake_server import SUBJECT_ID, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-empty-subj.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     db.upsert_subject(SUBJECT_ID, "Нормальное имя", {"title": "Нормальное имя"})
 
@@ -719,7 +719,7 @@ def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
     )
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-course.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     with FakeServer() as server:
         monkeypatch.setattr(config, "BASE_URL", server.base_url)
@@ -773,7 +773,7 @@ def test_course_sync_skips_structure_errors(temp_db, monkeypatch):
     from tests.fake_server import COURSE_ID, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-course2.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
 
     with FakeServer() as server:
         monkeypatch.setattr(config, "BASE_URL", server.base_url)
@@ -925,3 +925,154 @@ def test_subject_homeworks_groups_by_entity_lesson(temp_db):
     row = db.homework_row(KBS_EXTRA)
     assert row["lesson"]["id"] == LESSON_DB_ID
     assert db.lesson_homeworks(LESSON_DB_ID)[0]["id"] == KBS_EXTRA - 2
+
+
+# --------------------------------------------------------------------------- #
+# pacing and cache durability
+# --------------------------------------------------------------------------- #
+def test_sync_delay_is_about_a_second_and_random(monkeypatch):
+    from mt import config as cfg
+
+    monkeypatch.setattr(cfg, "SYNC_DELAY_RANGE", (0.6, 1.4))
+    samples = [cfg.sync_delay() for _ in range(200)]
+    assert all(0.6 <= value <= 1.4 for value in samples)
+    assert len(set(samples)) > 100          # not a fixed value
+    assert 0.8 < sum(samples) / len(samples) < 1.2  # around one second
+
+    monkeypatch.setattr(cfg, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    assert cfg.sync_delay() == 0.0
+    monkeypatch.setattr(cfg, "SYNC_DELAY_RANGE", (0.7, 0.7))
+    assert cfg.sync_delay() == 0.7
+
+
+def test_sync_delay_env_override(monkeypatch):
+    from mt import config as cfg
+
+    monkeypatch.setenv("MT_SYNC_DELAY", "0.2, 0.4")
+    assert cfg._delay_range_from_env() == (0.2, 0.4)
+    monkeypatch.setenv("MT_SYNC_DELAY", "0")
+    assert cfg._delay_range_from_env() == (0.0, 0.0)
+    monkeypatch.setenv("MT_SYNC_DELAY", "garbage")
+    assert cfg._delay_range_from_env() is None
+
+
+def test_sync_pauses_between_requests(temp_db, monkeypatch):
+    """Every request of a subject sync is followed by a random ~1 s pause."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import SUBJECT_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-pause.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.6, 1.4))
+
+    drawn: list[float] = []
+    slept: list[float] = []
+    real_delay = config.sync_delay
+
+    def spy() -> float:
+        value = real_delay()
+        drawn.append(value)
+        return value
+
+    monkeypatch.setattr(config, "sync_delay", spy)
+    monkeypatch.setattr(SyncThread, "msleep", lambda _self, ms: slept.append(ms / 1000))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, [SUBJECT_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    assert len(drawn) == 3  # one pause per knowledge base of the fake subject
+    assert all(0.6 <= value <= 1.4 for value in drawn)
+    assert len(set(drawn)) > 1  # randomized, not fixed
+    # the worker sleeps in 100 ms slices, so cancellation stays responsive
+    assert all(value <= 0.1 + 1e-9 for value in slept)
+    assert sum(slept) == pytest.approx(sum(drawn), abs=0.3)
+
+
+def test_failed_section_does_not_delete_cached_homework(temp_db, monkeypatch):
+    """A transient error must never prune a cached раздел."""
+    from mt.api import Api, ApiError
+    from mt.sync import SyncThread
+    from tests.fake_server import KBS_OFFLINE, SUBJECT_ID, TESTS_OFFLINE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-prune.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        # first run caches both homeworks
+        first = SyncThread(api, [SUBJECT_ID])
+        first.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        first.start()
+        assert first.wait(30_000)
+        assert db.get_kbs(KBS_OFFLINE) is not None
+
+        # second run cannot reach the offline homework
+        original = api.get_kbs_tests
+
+        def flaky(subject_id: int, kbs_id: int, mode: str):
+            if kbs_id == KBS_OFFLINE:
+                raise ApiError("HTTP 500: boom", status=500)
+            return original(subject_id, kbs_id, mode)
+
+        monkeypatch.setattr(api, "get_kbs_tests", flaky)
+        second = SyncThread(api, [SUBJECT_ID])
+        results: list = []
+        second.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        second.start()
+        assert second.wait(30_000)
+
+    assert results[0].errors >= 1
+    # nothing was pruned: the cached homework and its tests are intact
+    assert db.get_kbs(KBS_OFFLINE) is not None
+    assert len(db.list_tests(KBS_OFFLINE)) == len(TESTS_OFFLINE)
+
+
+def test_shorter_response_keeps_previously_cached_tests(temp_db, monkeypatch):
+    """A shorter (or partially empty) response must not delete cached tests."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import KBS_ONLINE, SUBJECT_ID, TESTS_ONLINE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-merge.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        first = SyncThread(api, [SUBJECT_ID])
+        first.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        first.start()
+        assert first.wait(30_000)
+        assert db.kbs_stats(KBS_ONLINE)["total"] == len(TESTS_ONLINE)
+
+        # the server suddenly answers with a single test of that homework
+        original = api.get_kbs_tests
+
+        def shortened(subject_id: int, kbs_id: int, mode: str):
+            payload = original(subject_id, kbs_id, mode)
+            if kbs_id == KBS_ONLINE and isinstance(payload, list):
+                return payload[:1]
+            return payload
+
+        monkeypatch.setattr(api, "get_kbs_tests", shortened)
+        second = SyncThread(api, [SUBJECT_ID])
+        results: list = []
+        second.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        second.start()
+        assert second.wait(30_000)
+
+    # nothing was lost: the five original tests are still there
+    assert db.kbs_stats(KBS_ONLINE)["total"] == len(TESTS_ONLINE)
+    assert db.list_tests(KBS_ONLINE)[0]["id"] == TESTS_ONLINE[0]["id"]
+    assert results[0].errors == 0

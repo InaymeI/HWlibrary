@@ -839,6 +839,37 @@ def replace_kbs_tests(
     return len(values)
 
 
+def merge_kbs_tests(
+    kid: int,
+    sid: int,
+    rows: Iterable[tuple[int, str | None, str, dict[str, Any]]],
+) -> int:
+    """Insert/update the tests of one knowledge base *without deleting* others.
+
+    The library is a cache the user keeps: a response that happens to be shorter
+    than what is already stored (pagination quirks, a test hidden for a while)
+    must not wipe the rest.  Returns how many tests the homework holds now.
+    """
+    stamp = now()
+    values = [
+        (tid, kid, sid, (ttype or ""), (title or "")[:300],
+         json.dumps(payload, ensure_ascii=False), stamp)
+        for tid, ttype, title, payload in rows
+    ]
+    with transaction() as conn:
+        if values:
+            conn.executemany(
+                "INSERT OR REPLACE INTO tests"
+                "(id, kbs_id, subject_id, type, title, payload_json, fetched_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                values,
+            )
+        total = conn.execute(
+            "SELECT COUNT(*) FROM tests WHERE kbs_id = ?", (kid,)
+        ).fetchone()[0]
+    return int(total or 0)
+
+
 def _title_of(payload: dict[str, Any]) -> str:
     title = payload.get("title") or payload.get("name") or ""
     return str(title)[:300]

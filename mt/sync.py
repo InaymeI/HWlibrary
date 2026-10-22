@@ -131,11 +131,24 @@ class SyncThread(QThread):
         return self._stop
 
     def _pause(self) -> None:
-        if config.SYNC_DELAY_MS:
-            self.msleep(int(config.SYNC_DELAY_MS))
+        """Sleep a random ~1 s before the next request (human-paced parsing).
+
+        The delay is re-drawn for every request, so a long sync never looks like
+        a fixed-rate bot.  Cancellation is honoured in 100 ms slices.
+        """
+        remaining = config.sync_delay()
+        if remaining <= 0:
+            return
+        while remaining > 0 and not self._stop:
+            step = min(0.1, remaining)
+            self.msleep(int(step * 1000))
+            remaining -= step
 
     # ------------------------------------------------------------------ #
     def run(self) -> None:  # noqa: D401 - Qt entry point
+        low, high = config.SYNC_DELAY_RANGE
+        if high > 0:
+            self.log.emit(f"— пауза между запросами: {low:.1f}–{high:.1f} с (случайная)")
         results: list[SyncResult] = []
         queue: list[tuple[str, int]] = [("course", cid) for cid in self.course_ids]
         queue += [("subject", sid) for sid in self.subject_ids]
@@ -312,7 +325,10 @@ class SyncThread(QThread):
                     self.progress.emit(position + 1, total, f"раздел #{kid}")
                 self._pause()
 
-            if not result.cancelled and seen_ids:
+            # Prune only when every section answered: a transient error must not
+            # delete a cached homework just because it was not fetched this time.
+            prunable = not result.cancelled and not result.errors and seen_ids
+            if prunable:
                 removed = db.prune_kbs(subject_id, seen_ids)
                 if removed:
                     self.log.emit(f"  удалено устаревших разделов: {removed}")
@@ -377,8 +393,14 @@ class SyncThread(QThread):
                 else:
                     self.log.emit(f"    пустой ответ ({mode}) — нечего кэшировать")
                 return 0
-            db.replace_kbs_tests(kid, subject_id, rows)
-            return len(rows)
+            # Merge, never replace: a shorter response must not delete tests
+            # that are already cached (the library is meant to keep everything).
+            total_cached = db.merge_kbs_tests(kid, subject_id, rows)
+            if total_cached > len(rows):
+                self.log.emit(
+                    f"    в базе осталось прежних заданий: {total_cached - len(rows)}"
+                )
+            return total_cached
         if last_error is not None:
             raise last_error
         return 0

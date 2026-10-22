@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "maximumtest-desktop"
 APP_TITLE = "MaximumTest Library"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 ORG_NAME = "maximumtest-desktop"
 
 # ``MT_*`` overrides are handy for development (demo databases, staging hosts).
@@ -51,9 +51,45 @@ REQUEST_RETRIES = 2
 #: POST /tests raises retries to 3 attempts with a 400 ms pause (API reference).
 POST_ATTEMPTS = 3
 POST_RETRY_DELAY = 0.4
-#: Pause between sync requests. The reference notes a 300-400 ms delay for
-#: existing scripts and that rate limiting is unknown, so stay conservative.
-SYNC_DELAY_MS = 300
+#: Pause between sync requests, in seconds: ``random.uniform(low, high)`` before
+#: every request.  Roughly a second with jitter — the reference notes that rate
+#: limiting is unknown, and a human-paced rhythm is the safest bet.
+#: Override with ``MT_SYNC_DELAY="0.6,1.4"`` (or ``0`` to disable).
+SYNC_DELAY_RANGE = (0.6, 1.4)
+
+
+def _delay_range_from_env() -> tuple[float, float] | None:
+    raw = os.environ.get("MT_SYNC_DELAY")
+    if raw is None:
+        return None
+    text = raw.strip().replace(",", " ").split()
+    try:
+        values = [max(0.0, float(part)) for part in text]
+    except ValueError:
+        return None
+    if not values:
+        return (0.0, 0.0)
+    if len(values) == 1:
+        return (values[0], values[0])
+    low, high = values[0], values[1]
+    return (min(low, high), max(low, high))
+
+
+_env_delay = _delay_range_from_env()
+if _env_delay is not None:
+    SYNC_DELAY_RANGE = _env_delay
+
+
+def sync_delay() -> float:
+    """A random pause (in seconds) to sleep before the next request."""
+    import random
+
+    low, high = SYNC_DELAY_RANGE
+    if high <= 0:
+        return 0.0
+    if high <= low:
+        return max(0.0, low)
+    return random.uniform(max(0.0, low), high)
 #: Time range imitated in `spentTime` for an answer (API reference: 45-90 s).
 SPENT_TIME_RANGE = (45, 90)
 

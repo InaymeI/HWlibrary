@@ -37,7 +37,7 @@ def window(app, tmp_path, monkeypatch):
     from tests.fake_server import SUBJECT_ID, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", tmp_path / "cookies.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
     db.set_database_path(tmp_path / "ui.sqlite3")
     db.init()
     with FakeServer() as server:
