@@ -7,8 +7,17 @@ import weakref
 from collections.abc import Iterable
 
 from PyQt6 import sip
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QCursor, QFont, QFontMetrics
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QFontMetrics,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -119,6 +128,119 @@ class StatCard(QFrame):
         self._icon_label.setStyleSheet(
             f"background: {soft}; border-radius: 10px;"
         )
+
+
+def paint_color(value: str) -> QColor:
+    """QColor from ``#rrggbb`` or the ``rgba(r, g, b, a)`` used in the palettes."""
+    text = (value or "").strip()
+    if text.startswith("rgba(") and text.endswith(")"):
+        parts = [part.strip() for part in text[5:-1].split(",")]
+        if len(parts) == 4:
+            try:
+                red, green, blue = (int(float(part)) for part in parts[:3])
+                alpha = float(parts[3])
+            except ValueError:
+                return QColor()
+            if alpha <= 1.0:
+                alpha *= 255.0
+            return QColor(red, green, blue, max(0, min(255, int(round(alpha)))))
+    return QColor(text)
+
+
+def paint_glass(
+    painter: QPainter,
+    rect: QRect,
+    palette: Palette,
+    *,
+    radius: int = 10,
+    strength: float = 1.0,
+) -> None:
+    """Liquid-glass pill: soft shadow, translucent body, specular top, rim.
+
+    Qt cannot blur what is *behind* a widget, so the effect is built from the
+    ingredients a frosted surface shows on screen: a translucent vertical
+    gradient over the grey panel, a bright top highlight, a hairline rim and a
+    soft ambient shadow underneath.  ``strength`` < 1 fades it down for hover.
+    """
+    box = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+    if box.isEmpty():
+        return
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    body_path = QPainterPath()
+    body_path.addRoundedRect(box, radius, radius)
+
+    # the shadow must stay *outside* the pill, otherwise it greys the glass
+    shade = paint_color(palette.glass_shadow)
+    painter.save()
+    outside = QPainterPath()
+    outside.addRect(box.adjusted(-6.0, -6.0, 6.0, 8.0))
+    painter.setClipPath(outside.subtracted(body_path))
+    for spread, factor in ((3.0, 0.35), (2.0, 0.55), (1.0, 0.85)):
+        shadow = QColor(shade)
+        shadow.setAlphaF(min(1.0, shade.alphaF() * factor * strength))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(
+            box.adjusted(-spread, -spread + 1.0, spread, spread + 1.0),
+            radius + spread,
+            radius + spread,
+        )
+    painter.restore()
+
+    top = paint_color(palette.glass_top)
+    bottom = paint_color(palette.glass_bottom)
+    top.setAlphaF(top.alphaF() * strength)
+    bottom.setAlphaF(bottom.alphaF() * strength)
+    body = QLinearGradient(box.topLeft(), box.bottomLeft())
+    body.setColorAt(0.0, top)
+    body.setColorAt(1.0, bottom)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(body)
+    painter.drawRoundedRect(box, radius, radius)
+
+    # lens: light bends in over the top edge and the bottom falls into shade
+    painter.setClipPath(body_path)
+    highlight = paint_color(palette.glass_highlight)
+    highlight.setAlphaF(highlight.alphaF() * strength)
+    glow = QLinearGradient(
+        box.topLeft(), QPointF(box.left(), box.top() + box.height() * 0.45)
+    )
+    glow.setColorAt(0.0, highlight)
+    clear = QColor(highlight)
+    clear.setAlphaF(0.0)
+    glow.setColorAt(1.0, clear)
+    painter.setBrush(glow)
+    painter.drawRect(box)
+
+    edge = paint_color(palette.glass_edge)
+    edge.setAlphaF(edge.alphaF() * strength)
+    falloff = QLinearGradient(
+        QPointF(box.left(), box.bottom() - box.height() * 0.40), box.bottomLeft()
+    )
+    falloff.setColorAt(0.0, QColor(edge.red(), edge.green(), edge.blue(), 0))
+    falloff.setColorAt(1.0, edge)
+    painter.setBrush(falloff)
+    painter.drawRect(box)
+    painter.setClipping(False)
+
+    # hairline rim, brighter where the light hits (top half)
+    rim = paint_color(palette.glass_border)
+    rim.setAlphaF(rim.alphaF() * strength * 0.55)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(rim, 1.0))
+    painter.drawRoundedRect(box, radius, radius)
+    painter.save()
+    painter.setClipRect(
+        QRectF(box.left(), box.top(), box.width(), box.height() / 2)
+    )
+    lit = paint_color(palette.glass_border)
+    lit.setAlphaF(lit.alphaF() * strength)
+    painter.setPen(QPen(lit, 1.0))
+    painter.drawRoundedRect(box, radius, radius)
+    painter.restore()
+    painter.restore()
 
 
 class SearchField(QLineEdit):

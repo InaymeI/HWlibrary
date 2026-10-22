@@ -479,3 +479,31 @@ def test_each_course_collapses_on_its_own(app, window):
     )
     app.processEvents()
     assert first.isExpanded()
+
+
+def test_light_theme_is_grey_and_selection_looks_glassy(app):
+    """No white panels any more; the glass pill is lighter than its panel."""
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from mt.theme import DARK, LIGHT
+    from mt.widgets import paint_color, paint_glass
+
+    for value in (LIGHT.surface, LIGHT.sidebar, LIGHT.surface_alt):
+        assert QColor(value).lightness() < 245, value
+    # the tint is translucent, so the grey behind it stays visible
+    assert paint_color(LIGHT.glass_top).alpha() < 200
+
+    assert paint_color("rgba(255, 255, 255, 0.5)").alpha() == 128
+    assert paint_color("rgba(1, 2, 3, 0.5)").isValid()
+    assert paint_color("#ececee") == QColor("#ececee")
+
+    for palette in (LIGHT, DARK):
+        image = QImage(140, 40, QImage.Format.Format_ARGB32)
+        image.fill(QColor(palette.sidebar))
+        painter = QPainter(image)
+        paint_glass(painter, QRect(2, 2, 136, 36), palette, radius=10)
+        painter.end()
+        panel = QColor(palette.sidebar).lightness()
+        assert image.pixelColor(70, 20).lightness() > panel  # frosted, not dark
+        assert image.pixelColor(70, 20).lightness() < 250   # not a white box

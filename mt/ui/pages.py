@@ -1779,6 +1779,7 @@ class AllTestsPage(QWidget):
         self._timer.start()
 
     def apply_theme(self, palette: Palette) -> None:
+        self._palette = palette
         self.search.set_icon_color(palette.muted)
         self.reload()
 

@@ -39,35 +39,50 @@ class Palette:
     rail_hover: str
     rail_active: str
     on_accent: str
+    # «liquid glass»: translucent surfaces for selection and the dark rail
+    glass_top: str
+    glass_bottom: str
+    glass_border: str
+    glass_highlight: str
+    glass_edge: str
+    glass_shadow: str
+    rail_shadow: str
 
 
 LIGHT = Palette(
     name="light",
-    bg="#e6e6e6",
-    surface="#fbfbfb",
-    surface_alt="#f3f3f3",
-    sidebar="#f7f7f7",
-    border="#ebebeb",
-    border_strong="#dadada",
-    text="#141414",
-    text_secondary="#575757",
-    muted="#8c8c8c",
-    accent="#1f1f1f",
-    accent_hover="#333333",
+    bg="#d3d3d7",
+    surface="#ececee",
+    surface_alt="#e3e3e7",
+    sidebar="#e7e7ea",
+    border="#dcdce0",
+    border_strong="#c7c7cd",
+    text="#171719",
+    text_secondary="#4e4e55",
+    muted="#7f7f88",
+    accent="#202022",
+    accent_hover="#343437",
     accent_pressed="#000000",
-    accent_soft="#ececec",
+    accent_soft="#dcdce1",
     success="#1f6b4d",
-    success_soft="#e6f2ec",
+    success_soft="#dcebe3",
     warning="#8a5a12",
-    warning_soft="#f6eddd",
+    warning_soft="#efe4d2",
     danger="#b23b3b",
-    danger_soft="#f8e8e8",
-    selection="#efefef",
-    shadow="rgba(0, 0, 0, 0.07)",
+    danger_soft="#eedddd",
+    selection="#e0e0e5",
+    shadow="rgba(0, 0, 0, 0.10)",
     rail="#1b1b1d",
     rail_hover="rgba(255, 255, 255, 0.10)",
     rail_active="rgba(255, 255, 255, 0.16)",
     on_accent="#ffffff",
+    glass_top="rgba(255, 255, 255, 0.52)",
+    glass_bottom="rgba(255, 255, 255, 0.26)",
+    glass_border="rgba(255, 255, 255, 0.72)",
+    glass_highlight="rgba(255, 255, 255, 0.34)",
+    glass_edge="rgba(24, 24, 30, 0.07)",
+    glass_shadow="rgba(24, 24, 30, 0.16)",
+    rail_shadow="rgba(20, 20, 26, 0.22)",
 )
 
 DARK = Palette(
@@ -97,6 +112,13 @@ DARK = Palette(
     rail_hover="rgba(255, 255, 255, 0.08)",
     rail_active="rgba(255, 255, 255, 0.14)",
     on_accent="#141414",
+    glass_top="rgba(255, 255, 255, 0.22)",
+    glass_bottom="rgba(255, 255, 255, 0.08)",
+    glass_border="rgba(255, 255, 255, 0.30)",
+    glass_highlight="rgba(255, 255, 255, 0.16)",
+    glass_edge="rgba(0, 0, 0, 0.45)",
+    glass_shadow="rgba(0, 0, 0, 0.55)",
+    rail_shadow="rgba(0, 0, 0, 0.65)",
 )
 
 PALETTES = {"light": LIGHT, "dark": DARK}
@@ -128,12 +150,21 @@ QToolButton#railButton {
     border: none;
     border-radius: 13px;
 }
+QToolButton#railButton { border: 1px solid transparent; }
 QToolButton#railButton:hover { background: $rail_hover; }
-QToolButton#railButton:checked { background: $rail_active; }
-QToolButton#railButton:pressed { background: $rail_active; }
+QToolButton#railButton:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.24), stop:1 rgba(255, 255, 255, 0.10));
+    border: 1px solid rgba(255, 255, 255, 0.18);
+}
+QToolButton#railButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.28), stop:1 rgba(255, 255, 255, 0.14));
+}
 QToolButton#railLogo {
-    background: $rail_active;
-    border: none;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.22), stop:1 rgba(255, 255, 255, 0.08));
+    border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 15px;
 }
 QToolButton#railLogo:hover { background: $rail_hover; }
@@ -286,7 +317,7 @@ QToolButton:checked { background: $accent_soft; border-color: transparent; }
 
 /* ---------------- inputs ---------------- */
 QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QComboBox, QSpinBox {
-    background: $surface;
+    background: $surface_alt;
     border: 1px solid $border_strong;
     border-radius: 8px;
     padding: 7px 10px;
@@ -356,19 +387,16 @@ QTreeWidget#sidebar::item {
     padding-left: 6px;
     margin: 1px 0;
 }
-QTreeWidget#sidebar::item:hover { background: $surface_alt; color: $text; }
-QTreeWidget#sidebar::item:selected {
-    background: $accent_soft;
-    color: $accent;
-}
-/* The strip left of the items (expand arrows) is painted by SidebarTree:
-   the style must not draw its own selection panel there. */
+/* The row background is a glass pill painted by SidebarTree (drawBranches),
+   so the style must keep the item and branch strips transparent — otherwise
+   its flat selection colour covers the left cap of the pill. */
+QTreeWidget#sidebar::item:hover { background: transparent; color: $text; }
+QTreeWidget#sidebar::item:selected { background: transparent; color: $accent; }
+QTreeWidget#sidebar::item:selected:!active { background: transparent; color: $text; }
 QTreeWidget#sidebar::branch { background: transparent; border: none; }
-QTreeWidget#sidebar::branch:selected { background: transparent; }
-QTreeWidget#sidebar::item:selected:!active {
-    background: $accent_soft;
-    color: $text;
-}
+QTreeWidget#sidebar::branch:selected,
+QTreeWidget#sidebar::branch:selected:!active,
+QTreeWidget#sidebar::branch:hover { background: transparent; }
 
 /* ---------------- tables ---------------- */
 QTableWidget, QTableView, QListWidget {
@@ -382,7 +410,8 @@ QTableWidget, QTableView, QListWidget {
 }
 QTableWidget::item, QListWidget::item { padding: 6px 8px; border: none; }
 QTableWidget::item:selected, QListWidget::item:selected {
-    background: $accent_soft;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 $glass_top, stop:1 $glass_bottom);
     color: $text;
 }
 QHeaderView::section {

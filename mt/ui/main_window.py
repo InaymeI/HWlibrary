@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from PyQt6 import sip
-from PyQt6.QtCore import QRect, QSettings, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QModelIndex,
+    QRect,
+    QSettings,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -20,7 +28,9 @@ from PyQt6.QtGui import (
     QGuiApplication,
     QIcon,
     QKeySequence,
+    QLinearGradient,
     QPainter,
+    QPixmap,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -57,7 +67,7 @@ from ..models import TestDetails, clear_cache, lesson_meta
 from ..sync import SyncResult, SyncThread
 from ..theme import PALETTES, Palette, stylesheet
 from ..theme import palette as get_palette
-from ..widgets import ICONS, Badge, label
+from ..widgets import ICONS, Badge, label, paint_color, paint_glass
 from .dialogs import (
     CookieDialog,
     HelpDialog,
@@ -95,9 +105,9 @@ class SidebarTree(QTreeWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._branch_color = "#8c8c8c"
-        self._hover_color = "#f3f3f3"
-        self._selected_color = "#ececec"
+        self._palette: Palette = PALETTES["light"]
+        self._branch_color = "#7f7f88"
+        self._hover_index = QModelIndex()
         self.setMouseTracking(True)
         self.setExpandsOnDoubleClick(False)
 
@@ -105,26 +115,28 @@ class SidebarTree(QTreeWidget):
         self._branch_color = color
         self.viewport().update()
 
-    def set_row_colors(self, hover: str, selected: str) -> None:
-        self._hover_color = hover
-        self._selected_color = selected
+    def set_glass_palette(self, palette: Palette) -> None:
+        self._palette = palette
         self.viewport().update()
 
     def drawRow(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
-        """One rounded pill for the whole row, arrow included."""
+        """The glass pill is painted in :meth:`drawBranches`, see there."""
         option.state &= ~QStyle.StateFlag.State_Selected
-        selected = self.currentIndex() == index
-        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        if selected or hovered:
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(self._selected_color if selected else self._hover_color))
-            pill = QRect(2, option.rect.top() + 2, self.viewport().width() - 8,
-                         option.rect.height() - 4)
-            painter.drawRoundedRect(pill, 9, 9)
-            painter.restore()
         super().drawRow(painter, option, index)
+
+    def _paint_pill(self, painter: QPainter, index) -> None:
+        selected = self.currentIndex() == index
+        hovered = index == self._hover_index
+        if not (selected or hovered):
+            return
+        row = self.visualRect(index)
+        if not row.isValid():
+            return
+        pill = QRect(2, row.top() + 2, self.viewport().width() - 8, row.height() - 4)
+        paint_glass(
+            painter, pill, self._palette, radius=10,
+            strength=1.0 if selected else 0.5,
+        )
 
     # ------------------------------------------------------------------ #
     def has_children(self, index) -> bool:
@@ -153,6 +165,9 @@ class SidebarTree(QTreeWidget):
             item.setExpanded(not item.isExpanded())
 
     def drawBranches(self, painter: QPainter, rect: QRect, index) -> None:
+        # Drawn here, not in drawRow: the style paints the branch strip *after*
+        # drawRow, and its selection colour would cover the left cap of the pill.
+        self._paint_pill(painter, index)
         # No style-painted strip and no default arrows: one chevron per parent.
         if not self.has_children(index):
             return
@@ -177,6 +192,9 @@ class SidebarTree(QTreeWidget):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         point = event.position().toPoint()
         index = self.indexAt(point)
+        if index != self._hover_index:
+            self._hover_index = index
+            self.viewport().update()
         over_arrow = self.has_children(index) and self.branch_rect(index).contains(point)
         self.viewport().setCursor(
             Qt.CursorShape.PointingHandCursor if over_arrow else Qt.CursorShape.ArrowCursor
@@ -184,6 +202,9 @@ class SidebarTree(QTreeWidget):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._hover_index.isValid():
+            self._hover_index = QModelIndex()
+            self.viewport().update()
         self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         super().leaveEvent(event)
 
@@ -430,7 +451,7 @@ class Sidebar(QWidget):
         if isinstance(delegate, SidebarDelegate):
             delegate.set_palette(palette)
         self.tree.set_branch_color(palette.muted)
-        self.tree.set_row_colors(palette.surface_alt, palette.accent_soft)
+        self.tree.set_glass_palette(palette)
         self.tree.blockSignals(True)
         self.tree.clear()
         self.section_label.setText("ПРЕДМЕТЫ")
@@ -658,6 +679,80 @@ class Sidebar(QWidget):
 
 RAIL_ICON_IDLE = "#c3c3c8"
 RAIL_ICON_ACTIVE = "#ffffff"
+
+
+class RailShadow(QWidget):
+    """Soft shadow the floating rail casts onto the grey canvas.
+
+    Qt clips a widget effect to the widget itself, so a shadow to the right of
+    the rail has to live in a sibling strip (``QGraphicsDropShadowEffect``
+    would be cut off at the rail border).  The band is a horizontal gradient
+    masked by a vertical one, so it fades out at the top and bottom corners.
+    """
+
+    WIDTH = 14
+    RADIUS = 24.0
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._color = QColor(0, 0, 0, 56)
+        self.setFixedWidth(self.WIDTH)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_theme(self, palette: Palette) -> None:
+        self._color = paint_color(palette.rail_shadow)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        size = self.size()
+        if size.isEmpty() or not self._color.isValid():
+            return
+        ratio = self.devicePixelRatioF()
+        band = QPixmap(size * ratio)
+        band.setDevicePixelRatio(ratio)
+        band.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(band)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        horizontal = QLinearGradient(0.0, 0.0, float(size.width()), 0.0)
+        start = QColor(self._color)
+        middle = QColor(self._color)
+        middle.setAlphaF(self._color.alphaF() * 0.45)
+        end = QColor(self._color)
+        end.setAlphaF(0.0)
+        horizontal.setColorAt(0.0, start)
+        horizontal.setColorAt(0.35, middle)
+        horizontal.setColorAt(1.0, end)
+        painter.setBrush(horizontal)
+        painter.drawRect(self.rect())
+        painter.end()
+
+        # fade the band at the rounded corners of the rail
+        mask = QPixmap(size * ratio)
+        mask.setDevicePixelRatio(ratio)
+        mask.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(mask)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        vertical = QLinearGradient(0.0, 0.0, 0.0, float(size.height()))
+        visible = QColor(0, 0, 0, 255)
+        hidden = QColor(0, 0, 0, 0)
+        vertical.setColorAt(0.0, hidden)
+        vertical.setColorAt(min(0.5, self.RADIUS / max(1, size.height())), visible)
+        vertical.setColorAt(max(0.5, 1.0 - self.RADIUS / max(1, size.height())), visible)
+        vertical.setColorAt(1.0, hidden)
+        painter.setBrush(vertical)
+        painter.drawRect(self.rect())
+        painter.end()
+
+        painter = QPainter(band)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        painter.drawPixmap(0, 0, mask)
+        painter.end()
+
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, band)
 
 
 class Rail(QFrame):
@@ -927,7 +1022,14 @@ class MainWindow(QMainWindow):
         self.rail = Rail(self)
         self.rail.navigate.connect(self.navigate)
         self.rail.settings_button.setMenu(self.main_menu)
-        outer.addWidget(self.rail, 0)
+        rail_holder = QWidget()
+        rail_layout = QHBoxLayout(rail_holder)
+        rail_layout.setContentsMargins(0, 0, 0, 0)
+        rail_layout.setSpacing(0)
+        rail_layout.addWidget(self.rail, 0)
+        self.rail_shadow = RailShadow(rail_holder)
+        rail_layout.addWidget(self.rail_shadow, 0)
+        outer.addWidget(rail_holder, 0)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")
@@ -1046,6 +1148,7 @@ class MainWindow(QMainWindow):
             app.setStyleSheet(stylesheet(resolved))
         ICONS.recolor(self._pal)
         self.rail.restyle(dark=resolved == "dark")
+        self.rail_shadow.set_theme(self._pal)
         self.dashboard_page.apply_theme(self._pal)
         self.courses_page.apply_theme(self._pal)
         self.course_page.apply_theme(self._pal)
