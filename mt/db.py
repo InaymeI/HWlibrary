@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from .models import looks_like_id
 
 SCHEMA_VERSION = 3
 
@@ -390,9 +391,11 @@ def rename_course(cid: int, title: str) -> None:
 
 
 def title_is_generic(title: str | None) -> bool:
-    """True for placeholders like «Предмет #111137» / «Домашка #777»."""
+    """True for «Предмет #111137», «Домашка #777» or a bare id like ``111137``."""
     text = str(title or "").strip()
-    return not text or text.startswith(("Предмет #", "Курс #", "Домашка #", "Урок #"))
+    if not text or text.startswith(("Предмет #", "Курс #", "Домашка #", "Урок #")):
+        return True
+    return looks_like_id(text)
 
 
 def course_title_is_generic(cid: int) -> bool:

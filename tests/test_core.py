@@ -973,7 +973,13 @@ def test_subject_sync_keeps_a_real_name(temp_db, monkeypatch):
     """A numeric домашка title from the API must not replace the real name."""
     from mt.api import Api
     from mt.sync import SyncThread
-    from tests.fake_server import COURSE_ID, SUBJECT_ID, SUBJECT_TITLE, FakeServer
+    from tests.fake_server import (
+        COURSE_ID,
+        COURSE_TITLE,
+        SUBJECT_ID,
+        SUBJECT_TITLE,
+        FakeServer,
+    )
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-subject-title.json")
     monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
@@ -1000,7 +1006,10 @@ def test_subject_sync_keeps_a_real_name(temp_db, monkeypatch):
         {"id": 501, "title": "Раздел 1"},
     ]}}, "") == ""
     assert db.title_is_generic(f"Домашка #{SUBJECT_ID}")
+    assert db.title_is_generic(str(SUBJECT_ID))       # a bare id is no name
+    assert db.title_is_generic(f"Предмет #{COURSE_ID}")
     assert not db.title_is_generic(SUBJECT_TITLE)
+    assert not db.title_is_generic(COURSE_TITLE)
     assert db.get_subject(SUBJECT_ID)["title"] == SUBJECT_TITLE
     assert db.homework_row(SUBJECT_ID)["title"] == SUBJECT_TITLE
 
