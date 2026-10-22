@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
+import traceback
 
 
 def _prepare_platform() -> None:
@@ -18,6 +20,38 @@ def _prepare_platform() -> None:
     ):
         os.environ["QT_QPA_PLATFORM"] = "wayland;xcb"
         os.environ.setdefault("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
+
+
+def install_excepthook() -> None:
+    """Show uncaught errors instead of letting Qt abort the process.
+
+    By default PyQt6 turns an exception raised inside a slot into ``qFatal``
+    (``Aborted (core dumped)``) with no chance to react.  With a custom
+    ``sys.excepthook`` the traceback is printed, the user sees a dialog and the
+    application keeps running.
+    """
+
+    def hook(exc_type, exc, tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        sys.stderr.write("".join(traceback.format_exception(exc_type, exc, tb)))
+        sys.stderr.flush()
+        with contextlib.suppress(Exception):
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+
+            if QApplication.instance() is None:
+                return
+            box = QMessageBox()
+            box.setWindowTitle("Непредвиденная ошибка")
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setText(f"{exc_type.__name__}: {exc}")
+            box.setInformativeText(
+                "Приложение продолжает работу. Подробности — в выводе терминала."
+            )
+            box.exec()
+
+    sys.excepthook = hook
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.sync:
         return _run_sync(args.sync)
 
+    install_excepthook()
     from .ui import MainWindow
 
     window = MainWindow()

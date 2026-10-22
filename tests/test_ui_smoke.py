@@ -134,3 +134,58 @@ def test_table_sorting_survives_refresh(app, window):
     window.kbs_page.refresh()
     app.processEvents()
     assert window.kbs_page.table.item(0, 1).text() == first
+
+
+def _run_sync(app, window, subject_id: int = 777):
+    """Start a sync from the UI and pump the event loop until it finishes."""
+    import time
+
+    window._start_sync([subject_id])
+    thread = window._sync
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        app.processEvents()
+        current = window._sync
+        if current is None or not current.isRunning():
+            break
+        time.sleep(0.01)
+    # let ``finished`` → ``deleteLater`` be delivered
+    for _ in range(5):
+        app.processEvents()
+    return thread
+
+
+def test_sync_can_be_started_again_after_finishing(app, window):
+    """Regression: a finished SyncThread was deleted while still referenced.
+
+    The second start (and moving the mouse afterwards) raised
+    ``RuntimeError: wrapped C/C++ object of type SyncThread has been deleted``
+    and Qt aborted the process.
+    """
+    first = _run_sync(app, window)
+    assert window._sync_thread() is None  # dangling wrapper was cleared
+
+    # the raw reference really is dead — this is what used to blow up:
+    with pytest.raises(RuntimeError):
+        first.isRunning()
+
+    _run_sync(app, window)  # would crash before the fix
+    assert window._sync_thread() is None
+
+    window.stop_sync()      # must be a no-op, not a crash
+    window.close()          # closeEvent used to touch the dangling thread
+    app.processEvents()
+
+
+def test_closing_after_cancelled_sync_is_safe(app, window):
+    window._start_sync([777])
+    app.processEvents()
+    window.stop_sync()
+    import time
+
+    deadline = time.time() + 30
+    while time.time() < deadline and window._sync_thread() is not None:
+        app.processEvents()
+        time.sleep(0.01)
+    window.close()
+    app.processEvents()

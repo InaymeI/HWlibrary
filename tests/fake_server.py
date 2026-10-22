@@ -85,6 +85,11 @@ class _Handler(BaseHTTPRequestHandler):
         state.requests.append(self.path)
         if not self._authorised():
             return
+        if state.get_errors:
+            # simulate a temporary backend failure
+            state.get_errors -= 1
+            self._send(500, {"error": "boom"})
+            return
         path = self.path.split("?")[0]
         if path == f"/api/v1/content/practice/curriculumsubject/{SUBJECT_ID}":
             self._send(200, {
@@ -108,7 +113,7 @@ class _Handler(BaseHTTPRequestHandler):
                 f"/api/v1/content/practice/curriculumsubject/{SUBJECT_ID}"
                 f"/knowledgebase/{kbs_id}/{mode}/tests"
             ):
-                self._send(200, tests)
+                self._send(200, [] if state.empty_tests else tests)
                 return
         if "/tests" in path:
             # Wrong mode for this knowledge base: behave like the real server.
@@ -125,14 +130,19 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             payload = {}
         state.posts.append({"path": self.path, "payload": payload})
+        state.post_attempts += 1
         if not self._authorised():
             return
-        self._send(200, {
-            "isRight": True,
-            "score": 1,
-            "lessonId": payload.get("lessonId"),
-            "answer": payload.get("answer"),
-        })
+        if state.fail_posts:
+            # transient failure: the client is expected to retry
+            state.fail_posts -= 1
+            self._send(500, {"error": "temporary"})
+            return
+        if state.post_status:
+            self._send(state.post_status, {"error": "nope"})
+            return
+        # Documented response shape: {"result": "true" | false, "percent": 100}
+        self._send(200, {"result": "true", "percent": 100})
 
 
 class FakeServer:
@@ -143,6 +153,15 @@ class FakeServer:
         self.httpd.state = self  # type: ignore[attr-defined]
         self.requests: list[str] = []
         self.posts: list[dict[str, Any]] = []
+        #: switch the tests endpoints to empty arrays
+        self.empty_tests = False
+        #: number of GET requests that answer 500 before succeeding
+        self.get_errors = 0
+        #: number of POST requests that answer 500 before succeeding
+        self.fail_posts = 0
+        #: fixed status to answer every POST with (4xx => must not be retried)
+        self.post_status = 0
+        self.post_attempts = 0
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
     @property

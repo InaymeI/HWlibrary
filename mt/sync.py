@@ -17,6 +17,34 @@ from . import config, db
 from .api import Api, ApiError, AuthError
 from .models import extract_kbs_entries, extract_tests, subject_title
 
+#: Keys a tests payload may wrap the array in.
+_ARRAY_KEYS = ("tests", "items", "data", "educationTests", "result")
+
+
+def _is_tests_array(payload: Any) -> bool:
+    """True when *payload* looks like a tests list (possibly wrapped).
+
+    A non-array answer means the mode is wrong for this knowledge base, so the
+    worker should try the next mode instead of caching garbage.
+    """
+    if isinstance(payload, list):
+        return True
+    if isinstance(payload, dict):
+        return any(isinstance(payload.get(key), list) for key in _ARRAY_KEYS)
+    return False
+
+
+def _dedupe_tests(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one object per ``test.id`` (the reference warns about repeats)."""
+    unique: dict[int, dict[str, Any]] = {}
+    for test in tests:
+        try:
+            test_id = int(test["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        unique.setdefault(test_id, test)
+    return list(unique.values())
+
 
 @dataclass
 class SyncResult:
@@ -74,11 +102,16 @@ class SyncThread(QThread):
             self.log.emit(f"→ предмет #{subject_id}")
             self.progress.emit(0, 1, f"предмет #{subject_id}")
             base = self.api.get_curriculum_subject(subject_id)
-            title = subject_title(base, f"Предмет #{subject_id}")
+            title = subject_title(base, "")
+            entries = [entry.as_row() for entry in extract_kbs_entries(base)]
+            if not title and not entries:
+                # «Ошибки и пустые ответы НЕ кэшировать»: keep the previous data.
+                result.error = "сервер вернул пустой предмет"
+                self.log.emit("  пустой ответ — кэш не изменён")
+                return result
+            title = title or f"Предмет #{subject_id}"
             db.upsert_subject(subject_id, title, base)
             self.log.emit(f"  «{title}»")
-
-            entries = [entry.as_row() for entry in extract_kbs_entries(base)]
             self.log.emit(f"  разделов в дереве: {len(entries)}")
             total = max(len(entries), 1)
             seen_ids: list[int] = []
@@ -129,7 +162,12 @@ class SyncThread(QThread):
 
     # ------------------------------------------------------------------ #
     def _sync_kbs(self, subject_id: int, kbs: dict[str, Any]) -> int:
-        """Fetch one knowledge base, trying other modes if the first one fails."""
+        """Fetch one knowledge base, trying other modes if the first one fails.
+
+        Mode order: the mode the KBS was found in, then online, offline,
+        aftertheory — the first response that is a tests array wins.
+        Empty arrays are not cached (the previous cache is preserved).
+        """
         kid = int(kbs["id"])
         preferred = kbs.get("mode") or "online"
         modes = [preferred] + [mode for mode in config.MODES if mode != preferred]
@@ -144,19 +182,30 @@ class SyncThread(QThread):
             except ApiError as exc:
                 last_error = exc
                 continue
-            tests = extract_tests(payload)
+            if not _is_tests_array(payload):
+                last_error = ApiError(f"режим {mode}: неожиданный формат ответа")
+                self.log.emit(f"    режим {mode}: не массив тестов, пробую другой")
+                continue
+
             db.upsert_kbs(kid, subject_id, mode, kbs.get("title"), kbs.get("lesson_id"))
+            tests = _dedupe_tests(extract_tests(payload))
             rows = []
             for test in tests:
-                try:
-                    test_id = int(test["id"])
-                except (TypeError, ValueError):
-                    continue
                 title = test.get("title") or test.get("name") or ""
-                rows.append((test_id, str(test.get("type") or ""), str(title), test))
-            db.replace_kbs_tests(kid, subject_id, rows)
+                rows.append((int(test["id"]), str(test.get("type") or ""), str(title), test))
             if mode != preferred:
                 self.log.emit(f"    режим {preferred} недоступен, использован {mode}")
+            if not rows:
+                # "Ошибки и пустые ответы НЕ кэшировать": keep what we already have.
+                cached = len(db.list_tests(kid))
+                if cached:
+                    self.log.emit(
+                        f"    пустой ответ ({mode}) — сохранён прежний кэш: {cached} тестов"
+                    )
+                else:
+                    self.log.emit(f"    пустой ответ ({mode}) — нечего кэшировать")
+                return 0
+            db.replace_kbs_tests(kid, subject_id, rows)
             return len(rows)
         if last_error is not None:
             raise last_error

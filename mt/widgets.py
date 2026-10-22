@@ -6,6 +6,7 @@ import contextlib
 import weakref
 from collections.abc import Iterable
 
+from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
@@ -263,6 +264,8 @@ class AutoHeightTextBrowser(QTextBrowser):
         return int(document.documentLayout().documentSize().height())
 
     def _update_height(self) -> None:
+        if sip.isdeleted(self):  # a deferred call may fire after the page is gone
+            return
         width = self.viewport().width()
         if width <= 0:
             return
@@ -289,6 +292,8 @@ class AutoHeightTextBrowser(QTextBrowser):
 
     def fit_to_content(self) -> None:
         """Recompute the height once the widget is inside its final layout."""
+        if sip.isdeleted(self):
+            return
         self._last_width = -1
         self._update_height()
 

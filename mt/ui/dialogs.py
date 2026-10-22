@@ -348,26 +348,66 @@ def _badge_for(variant: str) -> QLabel:
     )
 
 
+def _as_bool(value: Any) -> bool | None:
+    """Interpret ``true`` / ``"true"`` / ``1`` / ``"1"`` the way the API mixes them."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "ok", "yes", "success"):
+            return True
+        if text in ("false", "0", "no", "fail", "error"):
+            return False
+    return None
+
+
+def parse_result(payload: Any) -> tuple[bool | None, float | None]:
+    """Return ``(ok, percent)`` from an answer response.
+
+    Documented shape: ``{"result": "true", "percent": 100}``.  The old client
+    also accepts a handful of boolean flags, which are handled as a fallback.
+    """
+    if not isinstance(payload, dict):
+        return None, None
+    ok = _as_bool(payload.get("result"))
+    if ok is None:
+        for key in ("isRight", "isCorrect", "right", "correct", "isRightAnswer", "success"):
+            if key in payload:
+                ok = _as_bool(payload[key])
+                if ok is not None:
+                    break
+    percent = payload.get("percent")
+    percent_value: float | None = None
+    if isinstance(percent, (int, float, str)):
+        try:
+            percent_value = float(str(percent).replace("%", "").strip())
+        except ValueError:
+            percent_value = None
+    if ok is None and percent_value is not None:
+        ok = percent_value >= 100
+    return ok, percent_value
+
+
 def _verdict(payload: Any) -> tuple[str, str, str, str]:
     """Map a loose API response to (icon, colour, variant, headline)."""
     success_color, danger_color = "#12795a", "#c53b3b"
     if not isinstance(payload, dict):
         return "check", success_color, "success", "Ответ отправлен"
-    flags = []
-    for key in ("isRight", "isCorrect", "right", "correct", "isRightAnswer", "success"):
-        if key in payload and isinstance(payload[key], bool):
-            flags.append(payload[key])
-    score = payload.get("score") or payload.get("points")
-    if flags:
-        if all(flags):
-            return "check", success_color, "success", "Ответ принят: верно"
-        if not any(flags):
-            return "close", danger_color, "danger", "Ответ принят: неверно"
-    if isinstance(score, (int, float)) and score > 0:
-        return "check", success_color, "success", f"Ответ принят, баллов: {score}"
+
+    ok, percent = parse_result(payload)
+    suffix = ""
+    if percent is not None:
+        suffix = f" · {percent:g}%"
+
+    if ok is True:
+        return "check", success_color, "success", f"Ответ принят: верно{suffix}"
+    if ok is False:
+        return "close", danger_color, "danger", f"Ответ принят: неверно{suffix}"
     if payload.get("error") or payload.get("errors"):
         return "alert", danger_color, "danger", "Сервер сообщил об ошибке"
-    return "check", success_color, "success", "Ответ отправлен"
+    return "check", success_color, "success", f"Ответ отправлен{suffix}"
 
 
 # --------------------------------------------------------------------------- #
