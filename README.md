@@ -183,7 +183,7 @@ python -m venv .venv
 
 ```bash
 ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/python -m pytest            # 67 тестов, включая фиктивный сервер
+./.venv/bin/python -m pytest            # 68 тестов, включая фиктивный сервер
 ./.venv/bin/python -m ruff check mt tests
 ```
 
