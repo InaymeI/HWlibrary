@@ -85,10 +85,6 @@ class TestDetails:
         return config.is_supported(self.type)
 
     @property
-    def type_label(self) -> str:
-        return self.type or "—"
-
-    @property
     def right_options(self) -> tuple[AnswerOption, ...]:
         return tuple(option for option in self.options if option.is_right)
 
@@ -635,8 +631,49 @@ def extract_lessons(payload: Any) -> list[LessonEntry]:
     return lessons
 
 
+#: Block type names that mean «this node is a домашка».
+_PRACTICE_TYPES = frozenset({
+    "curriculum_practice_block",
+    "curriculum_practice",
+    "curriculum_homework_block",
+    "curriculum_homework",
+    "practice_block",
+    "practice",
+    "lesson_practice",
+    "homework",
+})
+#: ``entityInfo.type`` values that mark a homework entity.
+_PRACTICE_ENTITY_TYPES = frozenset({"subject", "practice", "homework"})
+
+
+def _is_practice_node(kind: str, entity: dict[str, Any], node: dict[str, Any]) -> bool:
+    lowered = kind.strip().lower()
+    if "practice" in lowered or "homework" in lowered:
+        return True
+    if lowered in _PRACTICE_TYPES:
+        return True
+    entity_type = str(
+        entity.get("type") or entity.get("entityType") or entity.get("entity_type") or ""
+    ).strip().lower()
+    if entity_type in _PRACTICE_ENTITY_TYPES:
+        return True
+    # A node that explicitly points at a subject is a homework reference even
+    # when its own type is missing or unknown.
+    return any(
+        _as_int(source.get(key)) is not None
+        for source in (entity, node)
+        for key in ("subjectId", "subject_id")
+    )
+
+
 def _practice_blocks_in(node: Any, out: list[PracticeBlock], depth: int = 0) -> None:
-    if depth > 8:
+    """Collect homeworks from any nesting the backend chooses.
+
+    The structure endpoint has been seen to put practice blocks under
+    ``children``, ``blocks``, ``content`` and even inside theory groups, so the
+    walker descends into every container instead of a fixed key list.
+    """
+    if depth > 10 or node is None:
         return
     if isinstance(node, list):
         for item in node:
@@ -644,41 +681,91 @@ def _practice_blocks_in(node: Any, out: list[PracticeBlock], depth: int = 0) -> 
         return
     if not isinstance(node, dict):
         return
+
     entity = node.get("entityInfo") or node.get("entity_info") or {}
     if not isinstance(entity, dict):
         entity = {}
-    kind = str(node.get("type") or node.get("blockType") or entity.get("type") or "")
-    subject_id = _as_int(
-        entity.get("id")
-        or node.get("entityId")
-        or node.get("entity_id")
-        or (node.get("id") if "practice" in kind else None)
-    )
-    is_practice = kind in ("curriculum_practice_block", "practice_block", "curriculum_practice")
-    if is_practice and subject_id is not None:
-        title = pick_title(node)
-        position = _as_int(node.get("position") or node.get("sort") or node.get("order"))
-        out.append(
-            PracticeBlock(
-                subject_id=subject_id,
-                title=title or f"Домашка #{subject_id}",
-                position=len(out) if position is None else position,
-            )
+    kind = str(node.get("type") or node.get("blockType") or node.get("kind") or "")
+    if not kind:
+        kind = str(entity.get("type") or entity.get("entityType") or "")
+
+    if _is_practice_node(kind, entity, node):
+        subject_id = _as_int(
+            entity.get("id")
+            or entity.get("subjectId")
+            or entity.get("subject_id")
+            or node.get("subjectId")
+            or node.get("subject_id")
+            or node.get("entityId")
+            or node.get("entity_id")
+            or node.get("id")
         )
-    for key in ("children", "items", "blocks", "structure", "data", "elements"):
-        value = node.get(key)
-        if isinstance(value, (list, dict)):
+        if subject_id is not None:
+            title = pick_title(node)
+            position = _as_int(
+                node.get("position") or node.get("sort") or node.get("order")
+            )
+            out.append(
+                PracticeBlock(
+                    subject_id=subject_id,
+                    title=title or f"Домашка #{subject_id}",
+                    position=len(out) if position is None else position,
+                )
+            )
+
+    for key, value in node.items():
+        if key in ("entityInfo", "entity_info"):
+            continue
+        if isinstance(value, (dict, list)):
             _practice_blocks_in(value, out, depth + 1)
 
 
 def extract_practice_blocks(payload: Any) -> list[PracticeBlock]:
-    """Collect practice blocks (subjects) from a lesson structure payload."""
+    """Collect homeworks (subjects) from a lesson structure payload."""
     found: list[PracticeBlock] = []
     _practice_blocks_in(payload, found)
     unique: dict[int, PracticeBlock] = {}
     for block in found:
         unique.setdefault(block.subject_id, block)
-    return list(unique.values())
+    return sorted(unique.values(), key=lambda block: block.position)
+
+
+_COURSE_TITLE_KEYS = ("courseTitleForModule", "course_title_for_module",
+                      "courseName", "course_name")
+
+
+def find_course_title(payload: Any) -> str:
+    """The course name from ``courseTitleForModule`` (or similar) anywhere.
+
+    The education-groups response may omit the top-level name while every
+    lesson item carries ``courseTitleForModule`` — the field the site itself
+    uses to label the предмет.
+    """
+    def walk(node: Any, depth: int) -> str:
+        if depth > 6 or node is None:
+            return ""
+        if isinstance(node, list):
+            for item in node:
+                found = walk(item, depth + 1)
+                if found:
+                    return found
+            return ""
+        if not isinstance(node, dict):
+            return ""
+        for key in _COURSE_TITLE_KEYS:
+            value = node.get(key)
+            if isinstance(value, str):
+                text = strip_html(value)
+                if text and not looks_like_id(text):
+                    return text
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                found = walk(value, depth + 1)
+                if found:
+                    return found
+        return ""
+
+    return walk(payload, 0)
 
 
 def extract_course_title(payload: Any, fallback: str = "") -> str:
@@ -689,6 +776,10 @@ def extract_course_title(payload: Any, fallback: str = "") -> str:
     are only used for *course* fields — taking a lesson's own title would
     label the whole subject with one lesson's name.
     """
+    # 0. The field the site itself uses for the предмет name.
+    module_title = find_course_title(payload)
+    if module_title:
+        return module_title
     course_keys = (
         "courseName", "course_name", "groupName", "group_name",
         "educationGroupName", "education_group_name",

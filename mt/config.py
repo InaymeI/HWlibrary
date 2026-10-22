@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "maximumtest-desktop"
 APP_TITLE = "MaximumTest Library"
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"
 ORG_NAME = "maximumtest-desktop"
 
 # ``MT_*`` overrides are handy for development (demo databases, staging hosts).
@@ -31,8 +31,6 @@ ENDPOINTS = {
     "lesson_structure": (
         "/api/v3/student/education-groups/{course_id}/structures/{lesson_id}"
     ),
-    # Undocumented, used only for an optional "what can I open?" probe.
-    "courses": "/api/v1/content/courses",
 }
 
 #: Pages requested for a course; the backend paginates lessons.
@@ -107,7 +105,6 @@ CACHE_DIR = _base_dir("XDG_CACHE_HOME", "~/.cache", "MT_CACHE_DIR")
 
 DB_PATH = DATA_DIR / "data.sqlite3"
 COOKIES_PATH = DATA_DIR / "cookies.json"
-LOG_PATH = CACHE_DIR / "app.log"
 
 
 def ensure_dirs() -> None:

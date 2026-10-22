@@ -31,13 +31,16 @@ LESSON_DB_ID = 41907128
 LESSON2_ENTITY_ID = 4772367
 LESSON2_DB_ID = 41907129
 LESSONS_PAYLOAD = {
-    "title": COURSE_TITLE,
+    # The list endpoint sometimes sends only the numeric id at the top level;
+    # the real name lives in `courseTitleForModule` of every lesson item.
+    "title": str(COURSE_ID),
     "data": [
         {
             "id": LESSON_DB_ID,
             "position": 1,
             "number": 1,
             "title": "Урок 1. Практика",
+            "courseTitleForModule": COURSE_TITLE,
             "date": "2025-09-03T19:40:00",
             "visited": True,
             "progress": {"percent": 100},
@@ -52,6 +55,7 @@ LESSONS_PAYLOAD = {
             "position": 2,
             "number": 2,
             "title": "Урок 2. Феодальные войны",
+            "courseTitleForModule": COURSE_TITLE,
             "date": "2025-09-10T19:40:00",
             "status": "viewed",
             "progress": 100,
@@ -81,11 +85,18 @@ LESSON_STRUCTURES = {
     LESSON2_DB_ID: {
         "data": {
             "id": LESSON2_DB_ID,
+            # The practice block of this lesson is nested under a wrapper the
+            # canonical schema does not mention — the parser must still find it.
             "children": [
                 {"type": "curriculum_theory_block", "entityInfo": {"id": 13, "title": "Лекция"}},
                 {
-                    "type": "curriculum_practice_block",
-                    "entityInfo": {"id": SUBJECT2_ID, "title": SUBJECT2_TITLE},
+                    "type": "curriculum_module",
+                    "content": [
+                        {
+                            "type": "lesson_practice",
+                            "entityInfo": {"id": SUBJECT2_ID, "title": SUBJECT2_TITLE},
+                        }
+                    ],
                 },
             ],
         }

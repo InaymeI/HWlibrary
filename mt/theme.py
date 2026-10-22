@@ -35,56 +35,68 @@ class Palette:
     danger_soft: str
     selection: str
     shadow: str
+    rail: str
+    rail_hover: str
+    rail_active: str
+    on_accent: str
 
 
 LIGHT = Palette(
     name="light",
-    bg="#f3f5f8",
-    surface="#ffffff",
-    surface_alt="#f8f9fb",
-    sidebar="#fbfcfe",
-    border="#e5e8ee",
-    border_strong="#d5dae3",
-    text="#161920",
-    text_secondary="#59616e",
-    muted="#8b93a1",
-    accent="#4a63dd",
-    accent_hover="#3d55c9",
-    accent_pressed="#3348ad",
-    accent_soft="#eceffe",
-    success="#12795a",
-    success_soft="#e4f5ed",
-    warning="#a2660f",
-    warning_soft="#fdf2e0",
-    danger="#c53b3b",
-    danger_soft="#fdecec",
-    selection="#eef1fe",
-    shadow="rgba(16, 24, 40, 0.06)",
+    bg="#e6e6e6",
+    surface="#fbfbfb",
+    surface_alt="#f3f3f3",
+    sidebar="#f7f7f7",
+    border="#ebebeb",
+    border_strong="#dadada",
+    text="#141414",
+    text_secondary="#575757",
+    muted="#8c8c8c",
+    accent="#1f1f1f",
+    accent_hover="#333333",
+    accent_pressed="#000000",
+    accent_soft="#ececec",
+    success="#1f6b4d",
+    success_soft="#e6f2ec",
+    warning="#8a5a12",
+    warning_soft="#f6eddd",
+    danger="#b23b3b",
+    danger_soft="#f8e8e8",
+    selection="#efefef",
+    shadow="rgba(0, 0, 0, 0.07)",
+    rail="#1b1b1d",
+    rail_hover="rgba(255, 255, 255, 0.10)",
+    rail_active="rgba(255, 255, 255, 0.16)",
+    on_accent="#ffffff",
 )
 
 DARK = Palette(
     name="dark",
-    bg="#131519",
-    surface="#1b1e24",
-    surface_alt="#21252c",
-    sidebar="#171a1f",
-    border="#2a2f38",
-    border_strong="#3a414c",
-    text="#e9ecf1",
-    text_secondary="#a9b2c0",
-    muted="#7c8695",
-    accent="#7389ff",
-    accent_hover="#8b9dff",
-    accent_pressed="#5b72e6",
-    accent_soft="#232b45",
-    success="#4ed3a0",
-    success_soft="#152c23",
-    warning="#e2ab55",
-    warning_soft="#2b2416",
-    danger="#ff8080",
-    danger_soft="#2e1b1d",
-    selection="#232a3d",
-    shadow="rgba(0, 0, 0, 0.35)",
+    bg="#0d0d0e",
+    surface="#18181a",
+    surface_alt="#212123",
+    sidebar="#141416",
+    border="#262628",
+    border_strong="#353537",
+    text="#ededed",
+    text_secondary="#b3b3b6",
+    muted="#7e7e83",
+    accent="#ededed",
+    accent_hover="#ffffff",
+    accent_pressed="#d5d5d5",
+    accent_soft="#2a2a2d",
+    success="#5fd6a4",
+    success_soft="#152a22",
+    warning="#e5b264",
+    warning_soft="#2b2316",
+    danger="#ff8b8b",
+    danger_soft="#2e1a1a",
+    selection="#26262a",
+    shadow="rgba(0, 0, 0, 0.45)",
+    rail="#08080a",
+    rail_hover="rgba(255, 255, 255, 0.08)",
+    rail_active="rgba(255, 255, 255, 0.14)",
+    on_accent="#141414",
 )
 
 PALETTES = {"light": LIGHT, "dark": DARK}
@@ -103,6 +115,58 @@ QWidget {
 }
 
 QMainWindow, QDialog, QWizard { background: $bg; }
+QWidget#shell { background: $bg; }
+
+/* ---------------- app shell ---------------- */
+QFrame#rail {
+    background: $rail;
+    border: none;
+    border-radius: 24px;
+}
+QToolButton#railButton {
+    background: transparent;
+    border: none;
+    border-radius: 13px;
+}
+QToolButton#railButton:hover { background: $rail_hover; }
+QToolButton#railButton:checked { background: $rail_active; }
+QToolButton#railButton:pressed { background: $rail_active; }
+QToolButton#railLogo {
+    background: $rail_active;
+    border: none;
+    border-radius: 15px;
+}
+QToolButton#railLogo:hover { background: $rail_hover; }
+
+QFrame#sidePanel {
+    background: $sidebar;
+    border: none;
+    border-radius: 22px;
+}
+QFrame#content {
+    background: $surface;
+    border: none;
+    border-radius: 22px;
+}
+QFrame#content QWidget#pageBody { background: transparent; }
+
+QToolButton#sectionToggle {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 2px;
+}
+QToolButton#sectionToggle:hover { background: $surface_alt; }
+QToolButton#moreActions {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 6px 8px;
+    color: $text_secondary;
+    font-weight: 700;
+}
+QToolButton#moreActions:hover { background: $surface_alt; color: $text; }
+QToolButton#moreActions::menu-indicator { image: none; width: 0; }
 
 QToolTip {
     background: $surface;
@@ -148,10 +212,10 @@ QToolBar {
 }
 QToolBar::separator { background: $border; width: 1px; margin: 4px 6px; }
 QStatusBar {
-    background: $surface;
-    border-top: 1px solid $border;
+    background: transparent;
+    border: none;
     color: $muted;
-    padding: 2px 8px;
+    padding: 2px 18px 8px 18px;
 }
 QStatusBar::item { border: none; }
 
@@ -160,8 +224,8 @@ QPushButton {
     background: $surface;
     color: $text;
     border: 1px solid $border_strong;
-    border-radius: 8px;
-    padding: 7px 14px;
+    border-radius: 10px;
+    padding: 8px 15px;
     font-weight: 500;
     min-height: 18px;
 }
@@ -175,7 +239,7 @@ QPushButton:disabled {
 QPushButton[variant="primary"] {
     background: $accent;
     border: 1px solid $accent;
-    color: #ffffff;
+    color: $on_accent;
 }
 QPushButton[variant="primary"]:hover {
     background: $accent_hover;
@@ -202,7 +266,7 @@ QPushButton[variant="danger"] {
     border: 1px solid transparent;
     color: $danger;
 }
-QPushButton[variant="danger"]:hover { background: $danger; color: #ffffff; }
+QPushButton[variant="danger"]:hover { background: $danger; color: $on_accent; }
 QPushButton[variant="subtle"] {
     background: $surface_alt;
     border: 1px solid $border;
@@ -213,7 +277,7 @@ QPushButton[variant="subtle"]:hover { background: $surface; color: $text; }
 QToolButton {
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: 9px;
     padding: 6px;
 }
 QToolButton:hover { background: $surface_alt; border-color: $border; }
@@ -227,7 +291,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QComboBox, QSpinBox {
     border-radius: 8px;
     padding: 7px 10px;
     selection-background-color: $accent;
-    selection-color: #ffffff;
+    selection-color: $on_accent;
 }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QTextBrowser:focus,
 QComboBox:focus, QSpinBox:focus { border-color: $accent; }
@@ -279,16 +343,17 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
 /* ---------------- sidebar tree ---------------- */
 QTreeWidget#sidebar {
-    background: $sidebar;
+    background: transparent;
     border: none;
-    padding: 6px 8px;
+    padding: 2px 6px;
     show-decoration-selected: 0;
+    outline: 0;
 }
 QTreeWidget#sidebar::item {
-    height: 34px;
-    border-radius: 8px;
+    height: 32px;
+    border-radius: 9px;
     color: $text_secondary;
-    padding-left: 8px;
+    padding-left: 6px;
     margin: 1px 0;
 }
 QTreeWidget#sidebar::item:hover { background: $surface_alt; color: $text; }
@@ -298,7 +363,14 @@ QTreeWidget#sidebar::item:selected {
 }
 /* the branch column must be painted explicitly, otherwise Qt draws the
    selection highlight behind the expand arrow */
+/* The branch strip is painted by the style, not by the item delegate: fill
+   it with the panel colour so a selected row stays a single pill. */
 QTreeWidget#sidebar::branch { background: $sidebar; border: none; }
+QTreeWidget#sidebar::branch:selected { background: $sidebar; }
+QTreeWidget#sidebar::item:selected:!active {
+    background: $accent_soft;
+    color: $text;
+}
 
 /* ---------------- tables ---------------- */
 QTableWidget, QTableView, QListWidget {
@@ -328,32 +400,34 @@ QTableCornerButton::section { background: $surface_alt; border: none; }
 
 /* ---------------- cards / labels ---------------- */
 QFrame#card {
+    background: $surface_alt;
+    border: 1px solid transparent;
+    border-radius: 18px;
+}
+QFrame#card[clickable="true"]:hover { background: $selection; }
+QFrame#cardFlat {
     background: $surface;
     border: 1px solid $border;
     border-radius: 12px;
 }
-QFrame#cardFlat {
-    background: $surface_alt;
-    border: 1px solid $border;
-    border-radius: 10px;
-}
 QFrame#pageHeader {
-    background: $surface;
-    border-bottom: 1px solid $border;
+    background: transparent;
+    border: none;
 }
 QFrame#sidebarHeader, QFrame#sidebarFooter {
-    background: $sidebar;
+    background: transparent;
     border: none;
 }
 QFrame#sidebarFooter { border-top: 1px solid $border; }
 
-QLabel[role="h1"] { font-size: 23px; font-weight: 700; color: $text; }
+QLabel[role="h1"] { font-size: 27px; font-weight: 700; color: $text; }
 QLabel[role="h2"] { font-size: 16px; font-weight: 600; color: $text; }
 QLabel[role="h3"] { font-size: 13px; font-weight: 600; color: $text; }
 QLabel[role="muted"] { color: $muted; }
 QLabel[role="secondary"] { color: $text_secondary; }
 QLabel[role="accent"] { color: $accent; font-weight: 600; }
-QLabel[role="stat"] { font-size: 26px; font-weight: 700; color: $text; }
+QLabel[role="stat"] { font-size: 30px; font-weight: 700; color: $text; }
+QLabel[role="statSmall"] { font-size: 19px; font-weight: 600; color: $text; margin-bottom: 8px; }
 QLabel[role="mono"] { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; color: $text_secondary; }
 QLabel[role="badge"] {
     background: $surface_alt;
@@ -392,8 +466,6 @@ QLabel[role="badge"][variant="outline"] {
 
 /* ---------------- misc ---------------- */
 QSplitter::handle { background: transparent; }
-QSplitter::handle:horizontal { width: 1px; }
-QSplitter::handle:hover { background: $border; }
 
 QProgressBar {
     background: $surface_alt;

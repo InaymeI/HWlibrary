@@ -733,6 +733,60 @@ def test_titles_are_names_never_ids():
     assert [block.title for block in blocks] == ["Домашка #777"]
 
 
+def test_practice_blocks_survive_any_nesting():
+    """Every homework of a lesson is found, whatever wrapper the backend uses."""
+    structure = {
+        "data": {
+            "id": 1,
+            "children": [
+                {"type": "curriculum_theory_block", "entityInfo": {"id": 11, "title": "Теория"}},
+                {"type": "curriculum_practice_block",
+                 "entityInfo": {"id": 777, "title": "Домашка №1"}},
+                # same block repeated deeper: must not be duplicated
+                {"type": "curriculum_group", "children": [
+                    {"type": "curriculum_practice_block",
+                     "entityInfo": {"id": 777, "title": "Домашка №1"}},
+                ]},
+                # a wrapper with a key nobody expects
+                {"type": "curriculum_module", "content": [
+                    {"type": "lesson_practice",
+                     "entityInfo": {"id": 888, "title": "Домашка №2"}},
+                ]},
+                # a block that only names its subject
+                {"type": "curriculum_task_block", "subjectId": 999, "title": "Домашка №3"},
+                # an entity typed as subject, no block type at all
+                {"entityInfo": {"id": 1000, "type": "subject", "title": "Домашка №4"}},
+                {"type": "curriculum_test_block", "entityInfo": {"id": 12, "title": "Квиз"}},
+            ],
+        }
+    }
+    blocks = models.extract_practice_blocks(structure)
+    assert [block.subject_id for block in blocks] == [777, 888, 999, 1000]
+    assert [block.title for block in blocks] == [
+        "Домашка №1", "Домашка №2", "Домашка №3", "Домашка №4"
+    ]
+
+
+def test_course_title_comes_from_course_title_for_module():
+    """`courseTitleForModule` wins over a numeric top-level title."""
+    payload = {
+        "id": 111137,
+        "title": "111137",
+        "data": [
+            {"id": 41907128, "title": "Урок 1", "courseTitleForModule": "История России"},
+            {"id": 41907129, "title": "Урок 2", "courseTitleForModule": "История России"},
+        ],
+    }
+    assert models.find_course_title(payload) == "История России"
+    assert models.extract_course_title(payload, "Предмет #111137") == "История России"
+
+    # ...including inside the subject's own curriculum tree
+    subject_payload = {"data": {"courseTitleForModule": "История России", "tree": {}}}
+    assert models.find_course_title(subject_payload) == "История России"
+    # and a numeric value is never accepted
+    assert models.find_course_title({"courseTitleForModule": "111137"}) == ""
+
+
 def test_sync_replaces_a_generic_course_title(temp_db, monkeypatch):
     """A cached «Предмет #111137» is repaired by the next sync."""
     from mt.api import Api

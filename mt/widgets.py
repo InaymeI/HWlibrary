@@ -8,7 +8,7 @@ from collections.abc import Iterable
 
 from PyQt6 import sip
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPen
+from PyQt6.QtGui import QCursor, QFont, QFontMetrics
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -32,13 +32,6 @@ def repolish(widget: QWidget) -> None:
     style.unpolish(widget)
     style.polish(widget)
     widget.update()
-
-
-def set_role(widget: QWidget, role: str, variant: str | None = None) -> None:
-    widget.setProperty("role", role)
-    if variant is not None:
-        widget.setProperty("variant", variant)
-    repolish(widget)
 
 
 def label(
@@ -94,6 +87,7 @@ class StatCard(QFrame):
         text_box = QVBoxLayout()
         text_box.setSpacing(2)
         self.value_label = label(value, "stat")
+        self._apply_value_role(value)
         self.caption_label = label(caption, "muted")
         text_box.addWidget(self.value_label)
         text_box.addWidget(self.caption_label)
@@ -107,8 +101,14 @@ class StatCard(QFrame):
             layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignTop)
         self.set_theme(None)
 
-    def set_value(self, value: str) -> None:
-        self.value_label.setText(value)
+    def _apply_value_role(self, value: str) -> None:
+        """Long values («только что») shrink so all cards keep the same rhythm."""
+        role = "stat" if len(value) <= 4 else "statSmall"
+        if self.value_label.property("role") != role:
+            self.value_label.setProperty("role", role)
+            style = self.value_label.style()
+            style.unpolish(self.value_label)
+            style.polish(self.value_label)
 
     def set_theme(self, palette: Palette | None) -> None:
         if not self._icon_label or not self._icon_name:
@@ -136,6 +136,54 @@ class SearchField(QLineEdit):
         self._action.setIcon(icons.icon("search", color, 16))
 
 
+class ElidedLabel(QLabel):
+    """A one-line label that shortens itself with «…» instead of clipping.
+
+    Page headers keep the title on the left and the actions on the right; on a
+    narrow window a long title must give way, not push the buttons out of the
+    viewport.
+    """
+
+    MAX_WIDTH = 720
+    MIN_WIDTH = 140
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full = text
+        # Ask for the width of the whole text (so it is never cut when there is
+        # room) but never push the header buttons: the layout caps the width at
+        # MAX_WIDTH, and eliding keeps it readable down to MIN_WIDTH.
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(self.MIN_WIDTH)
+        self.setMaximumWidth(self.MAX_WIDTH)
+
+    def sizeHint(self):  # noqa: N802 - Qt API
+        self.ensurePolished()  # the QSS font size is known only after this
+        metrics = QFontMetrics(self.font())
+        width = min(metrics.horizontalAdvance(self._full) + 4, self.MAX_WIDTH)
+        return QSize(max(width, self.MIN_WIDTH), super().sizeHint().height())
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt API
+        return QSize(self.MIN_WIDTH, super().minimumSizeHint().height())
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        self._full = text
+        super().setText(text)
+        self.updateGeometry()
+        self._elide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        metrics = QFontMetrics(self.font())
+        shown = metrics.elidedText(self._full, Qt.TextElideMode.ElideRight, self.width())
+        if shown != super().text():
+            super().setText(shown)
+        self.setToolTip(self._full if shown != self._full else "")
+
+
 class ClickableFrame(QFrame):
     """A card that behaves like a button (hover + click)."""
 
@@ -144,37 +192,14 @@ class ClickableFrame(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
+        self.setProperty("clickable", True)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self._hover = False
-
-    def enterEvent(self, event) -> None:  # noqa: N802 - Qt API
-        self._hover = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
-        self._hover = False
-        self.update()
-        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
-        super().paintEvent(event)
-        if not self._hover:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        pen = QPen(QColor(self.property("hoverColor") or "#4a63dd"))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 12, 12)
-
 
 class ListRow(ClickableFrame):
     """A раздел / домашка row used inside the lesson and course pages."""
@@ -183,7 +208,6 @@ class ListRow(ClickableFrame):
         self,
         title: str,
         subtitle: str = "",
-        badges: Iterable[tuple[str, str]] = (),
         trailing: str = "",
         icon_name: str | None = None,
         parent: QWidget | None = None,
@@ -212,14 +236,6 @@ class ListRow(ClickableFrame):
         if subtitle:
             self.subtitle_label = label(subtitle, "muted", wrap=True)
             text_box.addWidget(self.subtitle_label)
-        if badges:
-            badge_box = QHBoxLayout()
-            badge_box.setSpacing(6)
-            badge_box.setContentsMargins(0, 2, 0, 0)
-            for text, variant in badges:
-                badge_box.addWidget(Badge(text, variant))
-            badge_box.addStretch(1)
-            text_box.addLayout(badge_box)
         layout.addLayout(text_box, 1)
 
         if trailing:
@@ -369,41 +385,12 @@ class EmptyState(QWidget):
         layout.addStretch(1)
 
 
-class Divider(QFrame):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setFixedHeight(1)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.set_property_color("#e5e8ee")
-
-    def set_property_color(self, color: str) -> None:
-        self.setStyleSheet(f"background: {color}; border: none;")
-
-
-def icon_button(
-    name: str,
-    tooltip: str,
-    color: str = "#59616e",
-    size: int = 18,
-    parent: QWidget | None = None,
-) -> QPushButton:
-    button = QPushButton(parent)
-    button.setProperty("variant", "ghost")
-    button.setIcon(icons.icon(name, color, size))
-    button.setIconSize(QSize(size, size))
-    button.setToolTip(tooltip)
-    button.setFixedSize(size + 18, size + 14)
-    button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-    return button
-
-
 def primary_button(text: str, icon_name: str | None = None, size: int = 16) -> QPushButton:
     button = QPushButton(text)
     button.setProperty("variant", "primary")
     button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
     if icon_name:
-        button.setIcon(icons.icon(icon_name, "#ffffff", size))
-        button.setIconSize(QSize(size, size))
+        ICONS.bind(button, icon_name, "on_accent", size)
     return button
 
 
@@ -521,7 +508,8 @@ class IconBinder:
         if color_key == "white":
             set_color("#ffffff")
             return
-        set_color("#8b93a1" if color_key == "muted" else "#59616e")
+        initial = {"muted": "#8b93a1", "on_accent": "#ffffff"}
+        set_color(initial.get(color_key, "#59616e"))
         self._items.append((weakref.ref(target), name, color_key, size))
 
     def recolor(self, palette: Palette) -> None:

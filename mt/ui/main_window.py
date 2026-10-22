@@ -10,7 +10,18 @@ from typing import Any
 
 from PyQt6 import sip
 from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QIcon, QKeySequence
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QPainter,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -18,20 +29,20 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
-    QPushButton,
-    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
-    QToolBar,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -67,6 +78,99 @@ from .pages import (
 )
 
 APP_ICON = "book"
+COUNT_ROLE = Qt.ItemDataRole.UserRole + 7
+
+
+class SidebarTree(QTreeWidget):
+    """Sidebar tree with whole-row rounded selection.
+
+    Qt paints a tree selection cell by cell; with a separate counters column
+    the rounded highlight breaks into three pills, and the style also paints a
+    flat row panel behind the branches.  The selection state is cleared here so
+    only :class:`SidebarDelegate` draws it, once, across the whole row.
+    """
+
+    def drawRow(self, painter: QPainter, option: QStyleOptionViewItem,
+                index) -> None:
+        option.state &= ~QStyle.StateFlag.State_Selected
+        super().drawRow(painter, option, index)
+
+
+class SidebarDelegate(QStyledItemDelegate):
+    """«Название …………… счётчик» in one column, painted by hand."""
+
+    def __init__(self, tree: QTreeWidget) -> None:
+        super().__init__(tree)
+        self._tree = tree
+        self._text = "#141414"
+        self._secondary = "#575757"
+        self._muted = "#8c8c8c"
+        self._hover = "#f3f3f3"
+        self._selected = "#ececec"
+
+    def set_palette(self, palette: Palette) -> None:
+        self._text = palette.text
+        self._secondary = palette.text_secondary
+        self._muted = palette.muted
+        self._hover = palette.surface_alt
+        self._selected = palette.accent_soft
+        self._tree.viewport().update()
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = option.rect.adjusted(2, 2, -4, -2)
+        current = self._tree.currentIndex()
+        selected = bool(current.isValid() and current == index)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        if selected or hovered:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(self._selected if selected else self._hover))
+            painter.drawRoundedRect(rect, 9, 9)
+
+        font = index.data(Qt.ItemDataRole.FontRole) or option.font
+        if not isinstance(font, QFont):
+            font = option.font
+        painter.setFont(font)
+        label_rect = rect.adjusted(9, 0, -10, 0)
+
+        count = str(index.data(COUNT_ROLE) or "")
+        if count:
+            metrics = QFontMetrics(font)
+            count_width = metrics.horizontalAdvance(count)
+            count_rect = label_rect.adjusted(
+                label_rect.width() - count_width, 0, 0, 0
+            )
+            painter.setPen(QColor(self._secondary if selected else self._muted))
+            painter.drawText(
+                count_rect,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                count,
+            )
+            label_rect.setRight(count_rect.left() - 8)
+
+        brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        if selected:
+            color = QColor(self._text)
+        elif isinstance(brush, QBrush) and brush.style() != Qt.BrushStyle.NoBrush:
+            color = brush.color()
+        else:
+            color = QColor(self._secondary)
+        painter.setPen(color)
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        metrics = QFontMetrics(font)
+        painter.drawText(
+            label_rect,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            metrics.elidedText(text, Qt.TextElideMode.ElideRight, label_rect.width()),
+        )
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        return QSize(0, 30)
+
+
 
 
 class Sidebar(QWidget):
@@ -77,8 +181,11 @@ class Sidebar(QWidget):
     def __init__(self, main: MainWindow) -> None:
         super().__init__()
         self.main = main
-        self.setMinimumWidth(240)
-        self.setMaximumWidth(460)
+        self._tree_collapsed = bool(
+            QSettings().value("sidebar/collapsed", False, type=bool)
+        )
+        self.setMinimumWidth(248)
+        self.setMaximumWidth(430)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -86,55 +193,56 @@ class Sidebar(QWidget):
         header = QFrame()
         header.setObjectName("sidebarHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 16, 16, 10)
+        header_layout.setContentsMargins(18, 18, 16, 8)
         header_layout.setSpacing(10)
-        logo = QLabel()
-        logo.setPixmap(icons.pixmap(APP_ICON, "#4a63dd", 22))
-        logo.setFixedSize(38, 38)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet("background: #eceffe; border-radius: 10px;")
-        self.logo = logo
-        header_layout.addWidget(logo)
         brand_box = QVBoxLayout()
-        brand_box.setSpacing(0)
-        brand_box.addWidget(label(config.APP_TITLE, "h3"))
+        brand_box.setSpacing(1)
+        brand_box.addWidget(label("MaximumTest", "h2"))
         brand_box.addWidget(label("локальный кэш заданий", "muted"))
         header_layout.addLayout(brand_box, 1)
         layout.addWidget(header)
 
-        quick = QWidget()
-        quick_layout = QVBoxLayout(quick)
-        quick_layout.setContentsMargins(10, 6, 10, 4)
-        quick_layout.setSpacing(2)
-        self.dashboard_button = self._quick_button("book", "Обзор")
-        self.dashboard_button.clicked.connect(lambda: self.navigate.emit("dash"))
-        quick_layout.addWidget(self.dashboard_button)
-        self.courses_button = self._quick_button("book", "Предметы")
-        self.courses_button.clicked.connect(lambda: self.navigate.emit("courses"))
-        quick_layout.addWidget(self.courses_button)
-        self.all_button = self._quick_button("grid", "Все тесты")
-        self.all_button.clicked.connect(lambda: self.navigate.emit("all"))
-        quick_layout.addWidget(self.all_button)
-        layout.addWidget(quick)
+        search_box = QWidget()
+        search_layout = QHBoxLayout(search_box)
+        search_layout.setContentsMargins(14, 2, 14, 6)
+        self.search = QLineEdit()
+        self.search.setObjectName("sidebarSearch")
+        self.search.setPlaceholderText("Поиск по заданиям…")
+        self.search.setClearButtonEnabled(True)
+        self.search.returnPressed.connect(self._search_triggered)
+        search_layout.addWidget(self.search)
+        layout.addWidget(search_box)
 
         section = QWidget()
         section_layout = QHBoxLayout(section)
-        section_layout.setContentsMargins(20, 10, 20, 2)
-        self.section_label = label("ПРЕДМЕТЫ", "muted")
+        section_layout.setContentsMargins(12, 6, 12, 2)
+        section_layout.setSpacing(4)
+        self.section_label = QToolButton()
+        self.section_label.setObjectName("sectionToggle")
+        self.section_label.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.section_label.setText("ПРЕДМЕТЫ")
+        self.section_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.section_label.setToolTip(
+            "Свернуть или развернуть список предметов (Ctrl+B)"
+        )
+        ICONS.bind(self.section_label, "chevron-down", "text_secondary", 14)
+        self.section_label.clicked.connect(lambda: self.toggle_section())
         section_layout.addWidget(self.section_label)
         section_layout.addStretch(1)
         self.count_label = label("", "muted")
         section_layout.addWidget(self.count_label)
         layout.addWidget(section)
 
-        self.tree = QTreeWidget()
+        self.tree = SidebarTree()
         self.tree.setObjectName("sidebar")
         self.tree.setHeaderHidden(True)
-        self.tree.setColumnCount(2)
-        self.tree.setColumnWidth(1, 54)
-        self.tree.header().setStretchLastSection(False)
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.tree.setColumnCount(1)
+        self.tree.header().setStretchLastSection(True)
+        self.tree.setItemDelegate(SidebarDelegate(self.tree))
+        self.tree.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.tree.setMouseTracking(True)
         self.tree.setIndentation(12)
         self.tree.setAnimated(True)
         self.tree.setUniformRowHeights(True)
@@ -144,12 +252,22 @@ class Sidebar(QWidget):
         self.tree.itemActivated.connect(self._on_click)
         self.tree.customContextMenuRequested.connect(self._context_menu)
         layout.addWidget(self.tree, 1)
+        self.tree.setVisible(not self._tree_collapsed)
+        ICONS.bind(
+            self.section_label,
+            "chevron-right" if self._tree_collapsed else "chevron-down",
+            "text_secondary",
+            14,
+        )
 
         footer = QFrame()
         footer.setObjectName("sidebarFooter")
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(18, 10, 16, 12)
         footer_layout.setSpacing(2)
+        self.cookie_badge = Badge("cookies не заданы", "danger")
+        self.cookie_badge.setToolTip("Cookies нужны для доступа к заданиям")
+        footer_layout.addWidget(self.cookie_badge, 0, Qt.AlignmentFlag.AlignLeft)
         self.footer_stats = label("Кэш пуст", "muted")
         footer_layout.addWidget(self.footer_stats)
         self.footer_hint = label("F5 — синхронизация", "muted")
@@ -161,25 +279,58 @@ class Sidebar(QWidget):
         self.tree.itemCollapsed.connect(lambda _: self._save_expanded())
 
     # ------------------------------------------------------------------ #
-    def _quick_button(self, icon_name: str, text: str) -> QPushButton:
-        button = QPushButton(f"  {text}")
-        button.setProperty("variant", "ghost")
-        button.setCheckable(True)
-        button.setAutoExclusive(True)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        ICONS.bind(button, icon_name, "text_secondary", 17)
-        button.setStyleSheet("text-align: left; padding: 8px 12px;")
-        return button
-
     def highlight(self, page: str) -> None:
-        self.dashboard_button.setChecked(page == "dash")
-        self.courses_button.setChecked(page in ("courses", "course"))
-        self.all_button.setChecked(page == "all")
+        """Kept for compatibility: the icon rail owns the section highlight."""
+        rail = getattr(self.main, "rail", None)
+        if rail is not None:
+            rail.set_active(page)
+
+    # ------------------------------------------------------------------ #
+    def toggle_section(self, collapsed: bool | None = None) -> None:
+        """Collapse the предметы tree to give the content more room."""
+        if collapsed is None:
+            collapsed = not self._tree_collapsed
+        self._tree_collapsed = bool(collapsed)
+        self.tree.setVisible(not self._tree_collapsed)
+        ICONS.bind(
+            self.section_label,
+            "chevron-right" if self._tree_collapsed else "chevron-down",
+            "text_secondary",
+            14,
+        )
+        QSettings().setValue("sidebar/collapsed", self._tree_collapsed)
+
+    def _search_triggered(self) -> None:
+        query = self.search.text().strip()
+        if not query:
+            return
+        self.main.navigate("all")
+        self.main.all_page.search.setText(query)
+        self.main.all_page.search.setFocus()
+
+    def collapse_all(self, collapsed: bool = True) -> None:
+        root = self.tree.invisibleRootItem()
+        for index in range(root.childCount()):
+            root.child(index).setExpanded(not collapsed)
+
+    def _show_tree_menu(self, point) -> None:
+        menu = QMenu(self)
+        menu.addAction("Свернуть все предметы", lambda: self.collapse_all(True))
+        menu.addAction("Развернуть все предметы", lambda: self.collapse_all(False))
+        menu.addSeparator()
+        menu.addAction(
+            "Свернуть панель" if not self._tree_collapsed else "Развернуть панель",
+            lambda: self.toggle_section(),
+        )
+        menu.exec(self.tree.viewport().mapToGlobal(point))
 
     # ------------------------------------------------------------------ #
     def rebuild(self, palette: Palette) -> None:
         """Предмет → урок → домашка → раздел."""
         expanded = {**self._expanded_state, **self._expanded_states()}
+        delegate = self.tree.itemDelegate()
+        if isinstance(delegate, SidebarDelegate):
+            delegate.set_palette(palette)
         self.tree.blockSignals(True)
         self.tree.clear()
         self.section_label.setText("ПРЕДМЕТЫ")
@@ -187,13 +338,9 @@ class Sidebar(QWidget):
         def add_section(parent: QTreeWidgetItem, section: dict[str, Any]) -> None:
             total = int(section.get("total") or 0)
             supported = int(section.get("supported") or 0)
-            item = QTreeWidgetItem([
-                section.get("title") or f"Раздел #{section['id']}",
-                f"{supported}/{total}" if total else "",
-            ])
+            item = QTreeWidgetItem([section.get("title") or f"Раздел #{section['id']}"])
             item.setData(0, Qt.ItemDataRole.UserRole, ("kbs", int(section["id"])))
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            item.setForeground(1, QColor(palette.muted))
+            item.setData(0, COUNT_ROLE, f"{supported}/{total}" if total else "")
             item.setToolTip(
                 0,
                 f"{section.get('title') or ''}\nРаздел #{section['id']} · "
@@ -205,13 +352,9 @@ class Sidebar(QWidget):
             subject_id = int(homework["id"])
             total = int(homework.get("total") or 0)
             supported = int(homework.get("supported") or 0)
-            item = QTreeWidgetItem([
-                homework.get("title") or f"Домашка #{subject_id}",
-                f"{supported}/{total}" if total else "",
-            ])
+            item = QTreeWidgetItem([homework.get("title") or f"Домашка #{subject_id}"])
             item.setData(0, Qt.ItemDataRole.UserRole, ("homework", subject_id))
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            item.setForeground(1, QColor(palette.muted))
+            item.setData(0, COUNT_ROLE, f"{supported}/{total}" if total else "")
             item.setToolTip(
                 0,
                 f"{homework.get('title') or ''}\nДомашка #{subject_id} · "
@@ -230,10 +373,9 @@ class Sidebar(QWidget):
             )
             if meta.date_text:
                 title = f"{title} · {meta.date_text}"
-            item = QTreeWidgetItem([title, str(len(homeworks)) if homeworks else ""])
+            item = QTreeWidgetItem([title])
             item.setData(0, Qt.ItemDataRole.UserRole, ("lesson", int(lesson["id"])))
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            item.setForeground(1, QColor(palette.muted))
+            item.setData(0, COUNT_ROLE, str(len(homeworks)) if homeworks else "")
             item.setToolTip(
                 0,
                 f"{title}\nlessonId {lesson.get('entity_lesson_id') or '—'} · "
@@ -250,12 +392,9 @@ class Sidebar(QWidget):
                 "total": course.get("total") or 0,
                 "supported": course.get("supported") or 0,
             }
-            item = QTreeWidgetItem([
-                course.get("title") or f"Предмет #{course['id']}",
-                f"{stats['supported']}/{stats['total']}",
-            ])
+            item = QTreeWidgetItem([course.get("title") or f"Предмет #{course['id']}"])
             item.setData(0, Qt.ItemDataRole.UserRole, ("course", course["id"]))
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setData(0, COUNT_ROLE, f"{stats['supported']}/{stats['total']}")
             item.setToolTip(
                 0,
                 f"{course.get('title') or ''}\nПредмет #{course['id']} · "
@@ -266,7 +405,6 @@ class Sidebar(QWidget):
             font = item.font(0)
             font.setBold(True)
             item.setFont(0, font)
-            item.setForeground(1, QColor(palette.muted))
             self.tree.addTopLevelItem(item)
             count += 1
             for lesson, homeworks in lessons:
@@ -275,7 +413,7 @@ class Sidebar(QWidget):
 
         standalone = db.standalone_homeworks()
         if standalone:
-            caption = QTreeWidgetItem(["Домашки вне предметов", ""])
+            caption = QTreeWidgetItem(["Домашки вне предметов"])
             caption.setForeground(0, QColor(palette.muted))
             caption.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.tree.addTopLevelItem(caption)
@@ -360,17 +498,17 @@ class Sidebar(QWidget):
             self.navigate.emit(f"homework:{item_id}")
         elif kind == "lesson":
             self.navigate.emit(f"lesson:{item_id}")
-        elif kind == "subject":
-            self.navigate.emit(f"homework:{item_id}")
         elif kind == "kbs":
             self.navigate.emit(f"kbs:{item_id}")
 
     def _context_menu(self, point) -> None:
         item = self.tree.itemAt(point)
-        if item is None:
+        if item is None or not item.data(0, Qt.ItemDataRole.UserRole):
+            self._show_tree_menu(point)
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data:
+            self._show_tree_menu(point)
             return
         kind, item_id = data
         menu = QMenu(self)
@@ -400,18 +538,6 @@ class Sidebar(QWidget):
                            lambda: self.main.sync_lesson(item_id))
             menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
                            lambda: QGuiApplication.clipboard().setText(str(item_id)))
-        elif kind == "subject":
-            subject = db.get_subject(item_id) or {}
-            menu.addAction(icons.icon("external", "#59616e", 16), "Открыть",
-                           lambda: self.navigate.emit(f"subject:{item_id}"))
-            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать",
-                           lambda: self.main.sync_subject(item_id))
-            menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
-                           lambda: QGuiApplication.clipboard().setText(str(item_id)))
-            menu.addSeparator()
-            menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить из кэша",
-                           lambda: self.main.delete_subject(item_id))
-            menu.setToolTip(subject.get("title") or "")
         elif kind == "kbs":
             kbs = db.get_kbs(item_id) or {}
             menu.addAction(icons.icon("external", "#59616e", 16), "Открыть",
@@ -424,6 +550,128 @@ class Sidebar(QWidget):
             menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить раздел из кэша",
                            lambda: self.main.delete_kbs(item_id))
         menu.exec(self.tree.viewport().mapToGlobal(point))
+
+
+RAIL_ICON_IDLE = "#c3c3c8"
+RAIL_ICON_ACTIVE = "#ffffff"
+
+
+class Rail(QFrame):
+    """Slim dark icon rail — the only permanent navigation chrome."""
+
+    navigate = pyqtSignal(str)
+
+    def __init__(self, main: MainWindow) -> None:
+        super().__init__()
+        self.main = main
+        self.setObjectName("rail")
+        self.setFixedWidth(68)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 14, 12, 14)
+        layout.setSpacing(4)
+        self._nav: dict[str, QToolButton] = {}
+        self._bound: list[tuple[QToolButton, QAction, str]] = []
+
+        self.logo = QToolButton()
+        self.logo.setObjectName("railLogo")
+        self.logo.setFixedSize(44, 44)
+        self.logo.setIconSize(QSize(22, 22))
+        self.logo.setIcon(icons.icon(APP_ICON, "#ffffff", 22))
+        self.logo.setToolTip(config.APP_TITLE)
+        self.logo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logo.clicked.connect(lambda: self.navigate.emit("dash"))
+        layout.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(10)
+
+        layout.addWidget(self._nav_button("grid", "dash", "Обзор"))
+        layout.addWidget(self._nav_button("book", "courses", "Предметы"))
+        layout.addWidget(self._nav_button("layers", "all", "Все тесты"))
+        layout.addSpacing(8)
+        layout.addWidget(self._action_button(main.act_back, "arrow-left"))
+        layout.addWidget(self._action_button(main.act_forward, "chevron-right"))
+        layout.addStretch(1)
+
+        self.sync_button = self._action_button(main.act_sync_selected, "refresh")
+        layout.addWidget(self.sync_button)
+
+        layout.addWidget(self._action_button(main.act_add_subject, "plus"))
+        self.cookie_button = self._action_button(main.act_cookies, "key")
+        layout.addWidget(self.cookie_button)
+
+        self.theme_button = QToolButton()
+        self.theme_button.setObjectName("railButton")
+        self.theme_button.setFixedSize(44, 44)
+        self.theme_button.setIconSize(QSize(20, 20))
+        self.theme_button.setIcon(icons.icon("moon", RAIL_ICON_IDLE, 20))
+        self.theme_button.setToolTip("Переключить тему")
+        self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_button.clicked.connect(main.toggle_theme)
+        layout.addWidget(self.theme_button)
+
+        self.settings_button = QToolButton()
+        self.settings_button.setObjectName("railButton")
+        self.settings_button.setFixedSize(44, 44)
+        self.settings_button.setIconSize(QSize(20, 20))
+        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 20))
+        self.settings_button.setToolTip("Настройки и журнал")
+        self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        layout.addWidget(self.settings_button)
+
+    # ------------------------------------------------------------------ #
+    def _nav_button(self, icon_name: str, key: str, tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("railButton")
+        button.setFixedSize(44, 44)
+        button.setIconSize(QSize(20, 20))
+        button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 20))
+        button.setToolTip(tooltip)
+        button.setCheckable(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda _checked=False, page=key: self.navigate.emit(page))
+        self._nav[key] = button
+        return button
+
+    def _action_button(self, action: QAction, icon_name: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("railButton")
+        button.setFixedSize(44, 44)
+        button.setIconSize(QSize(20, 20))
+        button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 20))
+        button.setToolTip(action.text().rstrip("…"))
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setEnabled(action.isEnabled())
+        button.clicked.connect(action.trigger)
+        action.changed.connect(
+            lambda act=action, btn=button: btn.setEnabled(act.isEnabled())
+        )
+        self._bound.append((button, action, icon_name))
+        return button
+
+    def set_active(self, page: str) -> None:
+        active = {"dash": "dash", "courses": "courses", "course": "courses"}.get(
+            page, page if page in self._nav else ""
+        )
+        for key, button in self._nav.items():
+            button.setChecked(key == active)
+            color = RAIL_ICON_ACTIVE if key == active else RAIL_ICON_IDLE
+            button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
+
+    def restyle(self, dark: bool) -> None:
+        """Keep the rail legible: it stays dark in both themes."""
+        for button, _action, icon_name in self._bound:
+            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 20))
+        for key, button in self._nav.items():
+            active = button.isChecked()
+            color = RAIL_ICON_ACTIVE if active else RAIL_ICON_IDLE
+            button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
+        self.theme_button.setIcon(
+            icons.icon("sun" if dark else "moon", RAIL_ICON_IDLE, 20)
+        )
+        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 20))
+
+
+_NAV_ICONS = {"dash": "grid", "courses": "book", "all": "layers"}
 
 
 class MainWindow(QMainWindow):
@@ -522,9 +770,11 @@ class MainWindow(QMainWindow):
         return str(self.settings.value("ui/theme", "system"))
 
     def _build_menu(self) -> None:
-        bar = self.menuBar()
+        """One menu for the settings button — no menu bar, no clutter."""
+        menu = QMenu(self)
+        menu.setObjectName("mainMenu")
 
-        file_menu = bar.addMenu("Файл")
+        file_menu = menu.addMenu("Файл")
         file_menu.addAction(self.act_cookies)
         file_menu.addAction(self.act_refresh)
         file_menu.addSeparator()
@@ -533,13 +783,13 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
 
-        sync_menu = bar.addMenu("Синхронизация")
+        sync_menu = menu.addMenu("Синхронизация")
         sync_menu.addAction(self.act_add_subject)
         sync_menu.addAction(self.act_sync_selected)
         sync_menu.addAction(self.act_sync_all)
         sync_menu.addAction(self.act_stop)
 
-        view_menu = bar.addMenu("Вид")
+        view_menu = menu.addMenu("Вид")
         view_menu.addAction(self.act_dashboard)
         view_menu.addAction(self.act_courses)
         view_menu.addAction(self.act_all_tests)
@@ -550,78 +800,51 @@ class MainWindow(QMainWindow):
         theme_menu = view_menu.addMenu("Тема")
         for act in self.theme_actions.values():
             theme_menu.addAction(act)
-        view_menu.addSeparator()
-        view_menu.addAction(self.act_log)
-        view_menu.addSeparator()
-        reset = QAction("Сбросить настройки окна", self)
-        reset.triggered.connect(self.reset_layout)
-        view_menu.addAction(reset)
 
-        help_menu = bar.addMenu("Справка")
-        help_menu.addAction(self.act_help)
+        menu.addAction(self.act_log)
+        menu.addSeparator()
+        self.act_reset_layout = QAction("Сбросить настройки окна", self)
+        self.act_reset_layout.triggered.connect(self.reset_layout)
+        menu.addAction(self.act_reset_layout)
+        menu.addAction(self.act_help)
         about = QAction("О программе", self)
         about.triggered.connect(self.show_about)
-        help_menu.addAction(about)
+        menu.addAction(about)
+
+        self.main_menu = menu
 
     def _build_ui(self) -> None:
-        toolbar = QToolBar("Основное")
-        toolbar.setObjectName("mainToolbar")
-        toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(17, 17))
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.addToolBar(toolbar)
+        shell = QWidget()
+        shell.setObjectName("shell")
+        outer = QHBoxLayout(shell)
+        outer.setContentsMargins(14, 14, 14, 2)
+        outer.setSpacing(10)
 
-        self.back_button = QToolButton()
-        self.back_button.setDefaultAction(self.act_back)
-        self.forward_button = QToolButton()
-        self.forward_button.setDefaultAction(self.act_forward)
-        toolbar.addWidget(self.back_button)
-        toolbar.addWidget(self.forward_button)
-        toolbar.addSeparator()
+        self.rail = Rail(self)
+        self.rail.navigate.connect(self.navigate)
+        self.rail.settings_button.setMenu(self.main_menu)
+        outer.addWidget(self.rail, 0)
 
-        self.sync_button = QToolButton()
-        self.sync_button.setDefaultAction(self.act_sync_selected)
-        self.sync_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.sync_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        sync_menu = QMenu(self.sync_button)
-        sync_menu.addAction(self.act_sync_all)
-        sync_menu.addAction(self.act_stop)
-        self.sync_button.setMenu(sync_menu)
-        toolbar.addWidget(self.sync_button)
-        toolbar.addAction(self.act_add_subject)
-        toolbar.addSeparator()
-        toolbar.addAction(self.act_all_tests)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("mainSplitter")
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(10)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
-
-        self.cookie_badge = Badge("cookies не заданы", "danger")
-        self.cookie_badge.setToolTip("Cookies нужны для доступа к заданиям")
-        toolbar.addWidget(self.cookie_badge)
-        self.cookie_button = QToolButton()
-        self.cookie_button.setDefaultAction(self.act_cookies)
-        self.cookie_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.addWidget(self.cookie_button)
-
-        self.theme_button = QToolButton()
-        self.theme_button.setIcon(icons.icon("moon", "#59616e", 17))
-        self.theme_button.setToolTip("Переключить тему")
-        self.theme_button.setAutoRaise(True)
-        self.theme_button.clicked.connect(self.toggle_theme)
-        toolbar.addWidget(self.theme_button)
-
-        self.log_button = QToolButton()
-        self.log_button.setDefaultAction(self.act_log)
-        self.log_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        toolbar.addWidget(self.log_button)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        self.splitter = splitter
+        panel = QFrame()
+        panel.setObjectName("sidePanel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
         self.sidebar = Sidebar(self)
         self.sidebar.navigate.connect(self.navigate)
-        splitter.addWidget(self.sidebar)
+        panel_layout.addWidget(self.sidebar)
+        self.splitter.addWidget(panel)
+
+        content = QFrame()
+        content.setObjectName("content")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
 
         self.stack = QStackedWidget()
         self.dashboard_page = DashboardPage(self)
@@ -637,11 +860,13 @@ class MainWindow(QMainWindow):
                      self.test_page, self.all_page):
             page.navigate.connect(self.navigate)
             self.stack.addWidget(page)
-        splitter.addWidget(self.stack)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([288, 1072])
-        self.setCentralWidget(splitter)
+        content_layout.addWidget(self.stack)
+        self.splitter.addWidget(content)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([300, 1040])
+        outer.addWidget(self.splitter, 1)
+        self.setCentralWidget(shell)
 
         self.log_dock = QDockWidget("Журнал", self)
         self.log_dock.setObjectName("logDock")
@@ -716,13 +941,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setStyleSheet(stylesheet(resolved))
         ICONS.recolor(self._pal)
-        self.theme_button.setIcon(icons.icon(
-            "sun" if resolved == "dark" else "moon", self._pal.text_secondary, 17
-        ))
-        self.sidebar.logo.setPixmap(icons.pixmap(APP_ICON, self._pal.accent, 22))
-        self.sidebar.logo.setStyleSheet(
-            f"background: {self._pal.accent_soft}; border-radius: 10px;"
-        )
+        self.rail.restyle(dark=resolved == "dark")
         self.dashboard_page.apply_theme(self._pal)
         self.courses_page.apply_theme(self._pal)
         self.course_page.apply_theme(self._pal)
@@ -797,7 +1016,7 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.course_page)
             self.sidebar.highlight("course")
             self.sidebar.select("course", course_id)
-        elif target.startswith(("homework:", "subject:")):  # subject = домашка
+        elif target.startswith("homework:"):
             subject_id = _to_int(target.split(":", 1)[1])
             if subject_id is None:
                 return
@@ -911,9 +1130,10 @@ class MainWindow(QMainWindow):
 
     def _update_cookie_badge(self) -> None:
         has_cookies = self.api.has_cookies()
-        self.cookie_badge.setText("cookies активны" if has_cookies else "cookies не заданы")
-        self.cookie_badge.set_variant("success" if has_cookies else "danger")
-        self.cookie_badge.setToolTip(
+        badge = self.sidebar.cookie_badge
+        badge.setText("cookies активны" if has_cookies else "cookies не заданы")
+        badge.set_variant("success" if has_cookies else "danger")
+        badge.setToolTip(
             self.api.cookie_summary() if has_cookies else "Нажмите, чтобы импортировать cookies"
         )
         self.act_cookies.setText("Cookies сессии…" if not has_cookies else "Обновить cookies…")
@@ -934,7 +1154,7 @@ class MainWindow(QMainWindow):
             return
         subject_id = self._current_subject_id()
         if subject_id is None:
-            self.add_subject_dialog()
+            self.add_link_dialog()
             return
         self.sync_subject(subject_id)
 
@@ -950,7 +1170,7 @@ class MainWindow(QMainWindow):
         item = self.sidebar.tree.currentItem()
         while item is not None:
             data = item.data(0, Qt.ItemDataRole.UserRole)
-            if data and data[0] == "subject":
+            if data and data[0] == "homework":
                 return int(data[1])
             item = item.parent()
         subjects = db.list_subjects()
@@ -1154,10 +1374,6 @@ class MainWindow(QMainWindow):
             self.toast("Не удалось найти ID в строке", error=True)
             return
         self.open_link(link)
-
-    #: Old name kept for callers and tests.
-    def add_subject_dialog(self) -> None:
-        self.add_link_dialog()
 
     def open_link(self, link: ParsedLink) -> None:
         """Do the right thing for a parsed link."""
@@ -1450,11 +1666,6 @@ def _state_key(data: tuple[str, int]) -> str:
     if kind == "lesson":
         return f"l{item_id}"
     return str(item_id)
-
-
-def _extract_subject_id(text: str) -> int | None:
-    """Backwards compatible helper (subject id only)."""
-    return _parse_subject_url(text)[0]
 
 
 def _load_lesson_hints() -> dict[str, int]:

@@ -29,6 +29,7 @@ from .models import (
     extract_lessons,
     extract_practice_blocks,
     extract_tests,
+    find_course_title,
     plural,
     subject_title,
 )
@@ -127,10 +128,6 @@ class SyncThread(QThread):
     def stop(self) -> None:
         self._stop = True
 
-    @property
-    def stopping(self) -> bool:
-        return self._stop
-
     def _pause(self) -> None:
         """Sleep a random ~1 s before the next request (human-paced parsing).
 
@@ -205,6 +202,13 @@ class SyncThread(QThread):
                 self.progress.emit(position, len(lessons) + 1, f"урок «{lesson.title}»")
                 try:
                     structure = self.api.get_lesson_structure(course_id, lesson.id)
+                    if db.course_title_is_generic(course_id):
+                        # The list endpoint may omit the name; lesson items
+                        # carry `courseTitleForModule`.
+                        module_title = find_course_title(structure)
+                        if module_title:
+                            db.rename_course(course_id, module_title)
+                            title = module_title
                     blocks = extract_practice_blocks(structure)
                     db.set_lesson_subjects(lesson.id, [block.as_row() for block in blocks])
                     for block in blocks:
@@ -303,6 +307,12 @@ class SyncThread(QThread):
                 self.progress.emit(0, 1, f"домашка #{subject_id}")
             base = self.api.get_curriculum_subject(subject_id)
             title = subject_title(base, "")
+            course_id = db.course_id_for_subject(subject_id)
+            if course_id is not None and db.course_title_is_generic(course_id):
+                module_title = find_course_title(base)
+                if module_title:
+                    db.rename_course(course_id, module_title)
+                    self.log.emit(f"  предмет назван по courseTitleForModule: {module_title}")
             entries = [entry.as_row() for entry in extract_kbs_entries(base)]
             if not title and not entries:
                 # «Ошибки и пустые ответы НЕ кэшировать»: keep the previous data.

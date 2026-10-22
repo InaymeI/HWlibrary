@@ -24,7 +24,7 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from .models import AnswerOption, TestDetails, extract_right_answers, parse_options, test_details
+from .models import AnswerOption, TestDetails, extract_right_answers, parse_options
 
 __all__ = [
     "build_answer",
@@ -116,5 +116,3 @@ def answer_preview(details: TestDetails, limit: int = 3) -> str:
     return ", ".join(parts) + suffix
 
 
-def details_from_row(row: dict[str, Any]) -> TestDetails:
-    return test_details(row)
