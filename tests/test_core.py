@@ -261,10 +261,7 @@ def test_sync_pipeline_end_to_end(temp_db, monkeypatch):
     from mt.sync import SyncThread
     from tests.fake_server import (
         KBS_EXTRA,
-        KBS_OFFLINE,
         KBS_ONLINE,
-        LESSON2_ENTITY_ID,
-        LESSON_ENTITY_ID,
         SUBJECT_ID,
         FakeServer,
     )
@@ -287,21 +284,21 @@ def test_sync_pipeline_end_to_end(temp_db, monkeypatch):
         assert results, "sync thread did not finish"
         result = results[0]
         assert result.error is None
-        assert result.kbs == 3
-        assert result.tests == 7
+        assert result.kbs == 2
+        assert result.tests == 6
         assert result.errors == 0
 
         subject = db.get_subject(SUBJECT_ID)
-        assert subject["title"] == "Тестовый предмет"
-        assert {row["id"] for row in db.list_kbs(SUBJECT_ID)} == {
-            KBS_ONLINE, KBS_EXTRA, KBS_OFFLINE
-        }
+        assert subject["title"] == "Домашка №1"
+        assert {row["id"] for row in db.list_kbs(SUBJECT_ID)} == {KBS_ONLINE, KBS_EXTRA}
         assert db.kbs_stats(KBS_ONLINE)["total"] == 5
-        assert db.kbs_stats(KBS_OFFLINE)["total"] == 1
+        assert db.kbs_stats(KBS_EXTRA)["total"] == 1
         # the fallback mode probe must not leave duplicate tests behind
-        assert len(db.list_tests(KBS_OFFLINE)) == 1
-        assert db.get_kbs(KBS_OFFLINE)["lesson_id"] == LESSON2_ENTITY_ID
-        assert db.get_kbs(KBS_ONLINE)["lesson_id"] == LESSON_ENTITY_ID
+        assert len(db.list_tests(KBS_ONLINE)) == 5
+        # a homework (subject) collects the tests of all its sections
+        assert len(db.homework_tests(SUBJECT_ID)) == 6
+        assert db.homework_row(SUBJECT_ID)["sections"] == 2
+        assert db.homework_row(SUBJECT_ID)["total"] == 6
 
         # answering uses the endpoint from the API docs
         response = api.post_answer(SUBJECT_ID, 9001, 1001, ["11"], 42)
@@ -375,7 +372,7 @@ def test_api_reports_auth_and_network_errors(monkeypatch):
 
         api.set_cookies({"sessionid": "valid"})
         payload = api.get_curriculum_subject(SUBJECT_ID)
-        assert payload["title"] == "Тестовый предмет"
+        assert payload["title"] == "Домашка №1"
 
     # an unreachable host surfaces as a friendly NetworkError
     monkeypatch.setattr(config, "BASE_URL", "http://127.0.0.1:9")
@@ -476,7 +473,7 @@ def test_non_array_tests_payload_falls_back_to_another_mode(temp_db, monkeypatch
     """A dict answer is not a tests array → the next mode is tried."""
     from mt.api import Api
     from mt.sync import SyncThread
-    from tests.fake_server import KBS_OFFLINE, SUBJECT_ID, TESTS_OFFLINE, FakeServer
+    from tests.fake_server import KBS_OFFLINE, SUBJECT2_ID, TESTS_OFFLINE, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-mode.json")
     monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
@@ -486,7 +483,7 @@ def test_non_array_tests_payload_falls_back_to_another_mode(temp_db, monkeypatch
         monkeypatch.setattr(config, "BASE_URL", server.base_url)
         api = Api()
         api.set_cookies({"sessionid": "valid"})
-        thread = SyncThread(api, [SUBJECT_ID])
+        thread = SyncThread(api, [SUBJECT2_ID])
         thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
         thread.start()
         assert thread.wait(30_000)
@@ -700,6 +697,100 @@ def test_extract_lessons_and_practice_blocks_from_v3_shapes():
     assert models.extract_practice_blocks(None) == []
 
 
+def test_titles_are_names_never_ids():
+    """The backend sends numeric titles next to real names — pick the name."""
+    payload = {
+        "id": 111137,
+        "title": "111137",
+        "data": [
+            {
+                "id": 41907128,
+                "title": "4772366",
+                "entityInfo": {"id": 4772366, "title": "Урок 1. Введение"},
+            }
+        ],
+    }
+    assert models.looks_like_id("111137")
+    assert models.looks_like_id(" # 42 ")
+    assert models.looks_like_id("")
+    assert not models.looks_like_id("История России")
+
+    lessons = models.extract_lessons(payload)
+    assert [lesson.title for lesson in lessons] == ["Урок 1. Введение"]
+
+    # a lesson name must not become the name of the whole предмет
+    assert models.extract_course_title(payload, "Предмет #111137") == "Предмет #111137"
+    assert models.extract_course_title(
+        {"title": "История России", "data": payload["data"]}, ""
+    ) == "История России"
+
+    # practice blocks (домaшки) also come with real names
+    structure = {"data": {"children": [
+        {"type": "curriculum_practice_block",
+         "entityInfo": {"id": 777, "title": "888"}},
+    ]}}
+    blocks = models.extract_practice_blocks(structure)
+    assert [block.title for block in blocks] == ["Домашка #777"]
+
+
+def test_sync_replaces_a_generic_course_title(temp_db, monkeypatch):
+    """A cached «Предмет #111137» is repaired by the next sync."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, COURSE_TITLE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-title.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    db.upsert_course(COURSE_ID, f"Предмет #{COURSE_ID}", {})
+    assert db.course_title_is_generic(COURSE_ID)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    assert db.get_course(COURSE_ID)["title"] == COURSE_TITLE
+    assert not db.course_title_is_generic(COURSE_ID)
+
+
+def test_sync_keeps_a_real_title_when_payload_has_none(temp_db, monkeypatch):
+    """A nameless payload must not overwrite a good cached name."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, COURSE_TITLE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-title2.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    db.upsert_course(COURSE_ID, COURSE_TITLE, {})
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        original = api.get_education_group
+        nameless = {
+            "data": [
+                {"id": 41907128, "title": "Урок 1. Практика",
+                 "entityInfo": {"id": 4772366, "title": "Практика"}},
+            ],
+            "meta": {"current_page": 1, "last_page": 1},
+        }
+        monkeypatch.setattr(api, "get_education_group", lambda *a, **k: nameless)
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+        monkeypatch.setattr(api, "get_education_group", original)
+
+    assert db.get_course(COURSE_ID)["title"] == COURSE_TITLE
+
+
 def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
     """One course link fills lessons, practice blocks and their tests."""
     from mt.api import Api
@@ -709,8 +800,10 @@ def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
         COURSE_TITLE,
         KBS_ONLINE,
         LESSON2_DB_ID,
+        LESSON2_ENTITY_ID,
         LESSON_DB_ID,
         LESSON_ENTITY_ID,
+        SUBJECT2_ID,
         SUBJECT_ID,
         TESTS_EXTRA,
         TESTS_OFFLINE,
@@ -746,24 +839,29 @@ def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
     lessons = db.course_lessons(COURSE_ID)
     assert [lesson["id"] for lesson, _subjects in lessons] == [LESSON_DB_ID, LESSON2_DB_ID]
     assert [subject["id"] for subject in lessons[0][1]] == [SUBJECT_ID]
-    assert lessons[1][1] == []  # a theory-only lesson has no practice block
+    # every lesson lists its own домашку — the bug the user reported
+    assert [subject["id"] for subject in lessons[1][1]] == [SUBJECT2_ID]
+    assert db.homework_row(SUBJECT_ID)["lesson"]["id"] == LESSON_DB_ID
+    assert db.homework_row(SUBJECT2_ID)["lesson"]["id"] == LESSON2_DB_ID
 
     # the answer endpoint needs the entity lesson id, not the database one
     assert db.lesson_id_for_subject(SUBJECT_ID) == LESSON_ENTITY_ID
+    assert db.lesson_id_for_subject(SUBJECT2_ID) == LESSON2_ENTITY_ID
     assert db.get_lesson(LESSON_DB_ID)["entity_lesson_id"] == LESSON_ENTITY_ID
 
     assert db.kbs_stats(KBS_ONLINE)["total"] == len(TESTS_ONLINE)
     assert len(results) == 1
     result = results[0]
     assert result.course_id == COURSE_ID
-    assert (result.lessons, result.subjects) == (2, 1)
+    assert (result.lessons, result.subjects) == (2, 2)
     total_tests = len(TESTS_ONLINE) + len(TESTS_EXTRA) + len(TESTS_OFFLINE)
     assert result.tests == total_tests
     assert not result.error
-    assert [item.subject_id for item in subjects] == [SUBJECT_ID]
+    assert [item.subject_id for item in subjects] == [SUBJECT_ID, SUBJECT2_ID]
 
     stats = db.course_stats(COURSE_ID)
-    assert stats["subjects"] == 1 and stats["total"] == total_tests
+    assert stats["homeworks"] == 2 and stats["total"] == total_tests
+    assert stats["sections"] == 3 and stats["lessons"] == 2
 
 
 def test_course_sync_skips_structure_errors(temp_db, monkeypatch):
@@ -848,7 +946,7 @@ def test_lesson_meta_parses_date_status_progress_topics():
         }),
     }
     meta = models.lesson_meta(row)
-    assert meta.heading == "Занятие 1"
+    assert meta.heading == "Урок 1"
     assert meta.date_text == "3 сентября"
     assert meta.status == "Посещено"
     assert meta.status_kind == "success"
@@ -871,60 +969,105 @@ def test_lesson_meta_parses_date_status_progress_topics():
     assert models.format_lesson_date("не дата") == ""
 
 
-def test_subject_homeworks_groups_by_entity_lesson(temp_db):
-    """Домашки belong to the lesson whose entity id matches their lessonId."""
+def test_subject_sync_keeps_a_real_name(temp_db, monkeypatch):
+    """A numeric домашка title from the API must not replace the real name."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, SUBJECT_ID, SUBJECT_TITLE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-subject-title.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        original = api.get_curriculum_subject
+
+        def numeric_title(subject_id: int):
+            payload = original(subject_id)
+            payload["title"] = str(subject_id)  # the backend sometimes does this
+            return payload
+
+        monkeypatch.setattr(api, "get_curriculum_subject", numeric_title)
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    # a wildcard search would return «Раздел 1» — the домашка must keep its name
+    assert models.subject_title({"title": "777", "tree": {"online": [
+        {"id": 501, "title": "Раздел 1"},
+    ]}}, "") == ""
+    assert db.title_is_generic(f"Домашка #{SUBJECT_ID}")
+    assert not db.title_is_generic(SUBJECT_TITLE)
+    assert db.get_subject(SUBJECT_ID)["title"] == SUBJECT_TITLE
+    assert db.homework_row(SUBJECT_ID)["title"] == SUBJECT_TITLE
+
+
+def test_homeworks_follow_lesson_structure_not_kbs_lesson_id(temp_db):
+    """A домашка belongs to the lesson whose structure contains it.
+
+    The real curriculum payload carries no ``lessonId``, so grouping by
+    ``knowledge_bases.lesson_id`` left every lesson page empty. The only
+    reliable link is the lesson structure (``lesson_subjects``).
+    """
     from tests.fake_server import (
+        COURSE_ID,
         KBS_EXTRA,
         KBS_OFFLINE,
+        KBS_ONLINE,
         LESSON2_DB_ID,
         LESSON2_ENTITY_ID,
         LESSON_DB_ID,
         LESSON_ENTITY_ID,
+        SUBJECT2_ID,
         SUBJECT_ID,
     )
 
-    db.upsert_subject(SUBJECT_ID, "Предмет", {})
-    db.upsert_course(111137, "Демо-курс", {})
-    db.replace_course_lessons(111137, [
+    db.upsert_subject(SUBJECT_ID, "Домашка №1", {})
+    db.upsert_subject(SUBJECT2_ID, "Домашка №2", {})
+    db.upsert_course(COURSE_ID, "История России", {})
+    db.replace_course_lessons(COURSE_ID, [
         {"id": LESSON_DB_ID, "entity_id": LESSON_ENTITY_ID, "title": "Урок 1",
          "position": 0, "payload": {"number": 1, "date": "2025-09-03T19:40:00"}},
         {"id": LESSON2_DB_ID, "entity_id": LESSON2_ENTITY_ID, "title": "Урок 2",
          "position": 1, "payload": {"number": 2}},
     ])
     db.set_lesson_subjects(LESSON_DB_ID, [{"subject_id": SUBJECT_ID, "position": 0}])
-    db.set_lesson_subjects(LESSON2_DB_ID, [{"subject_id": SUBJECT_ID, "position": 0}])
-    for kid, lesson, title in (
-        (KBS_EXTRA - 2, LESSON_ENTITY_ID, "Домашка 1"),
-        (KBS_EXTRA, LESSON_ENTITY_ID, "Домашка 2"),
-        (KBS_OFFLINE, LESSON2_ENTITY_ID, "Домашка 3"),
-    ):
-        db.upsert_kbs(kid, SUBJECT_ID, "online", title, lesson)
+    db.set_lesson_subjects(LESSON2_DB_ID, [{"subject_id": SUBJECT2_ID, "position": 0}])
+    # no lesson_id on the knowledge bases — exactly like the real backend
+    db.upsert_kbs(KBS_ONLINE, SUBJECT_ID, "online", "Раздел 1", None)
+    db.upsert_kbs(KBS_EXTRA, SUBJECT_ID, "online", "Раздел 2", None)
+    db.upsert_kbs(KBS_OFFLINE, SUBJECT2_ID, "offline", "Раздел 3", None)
 
-    grouped = db.subject_homeworks(SUBJECT_ID)
-    assert [lesson["id"] for lesson, _ in grouped["lessons"]] == [
-        LESSON_DB_ID, LESSON2_DB_ID
-    ]
-    first, second = grouped["lessons"]
-    assert [homework["id"] for homework in first[1]] == [KBS_EXTRA - 2, KBS_EXTRA]
-    assert [homework["id"] for homework in second[1]] == [KBS_OFFLINE]
-    assert grouped["orphans"] == []
+    first = db.lesson_homeworks(LESSON_DB_ID)
+    assert [homework["id"] for homework in first] == [SUBJECT_ID]
+    assert first[0]["sections"] == 2 and first[0]["title"] == "Домашка №1"
+    second = db.lesson_homeworks(LESSON2_DB_ID)
+    assert [homework["id"] for homework in second] == [SUBJECT2_ID]
+    assert second[0]["title"] == "Домашка №2"
 
-    # a homework without a lessonId is shown separately, never lost
-    db.upsert_kbs(999, SUBJECT_ID, "online", "Без занятия", None)
-    grouped = db.subject_homeworks(SUBJECT_ID)
-    assert [homework["id"] for homework in grouped["orphans"]] == [999]
-
-    # the course view groups the same way and keeps the lesson meta
-    course_groups = db.course_homeworks(111137)
+    course_groups = db.course_homeworks(COURSE_ID)
     assert [lesson["id"] for lesson, _ in course_groups["lessons"]] == [
         LESSON_DB_ID, LESSON2_DB_ID
     ]
+    assert [homework["id"] for homework in course_groups["lessons"][0][1]] == [SUBJECT_ID]
+    assert [homework["id"] for homework in course_groups["lessons"][1][1]] == [SUBJECT2_ID]
     meta = models.lesson_meta(course_groups["lessons"][0][0])
-    assert meta.heading == "Занятие 1" and meta.date_text == "3 сентября"
+    assert meta.heading == "Урок 1" and meta.date_text == "3 сентября"
 
-    row = db.homework_row(KBS_EXTRA)
+    row = db.homework_row(SUBJECT_ID)
+    assert row["title"] == "Домашка №1"
     assert row["lesson"]["id"] == LESSON_DB_ID
-    assert db.lesson_homeworks(LESSON_DB_ID)[0]["id"] == KBS_EXTRA - 2
+    assert row["course"]["id"] == COURSE_ID
+    assert [section["id"] for section in db.homework_sections(SUBJECT_ID)] == [
+        KBS_ONLINE, KBS_EXTRA
+    ]
+
+    # a homework that no lesson points at stays visible instead of vanishing
+    db.upsert_subject(999, "Домашка без урока", {})
+    assert [homework["id"] for homework in db.standalone_homeworks()] == [999]
 
 
 # --------------------------------------------------------------------------- #
@@ -986,7 +1129,7 @@ def test_sync_pauses_between_requests(temp_db, monkeypatch):
         thread.start()
         assert thread.wait(30_000)
 
-    assert len(drawn) == 3  # one pause per knowledge base of the fake subject
+    assert len(drawn) == 2  # one pause per knowledge base of the fake homework
     assert all(0.6 <= value <= 1.4 for value in drawn)
     assert len(set(drawn)) > 1  # randomized, not fixed
     # the worker sleeps in 100 ms slices, so cancellation stays responsive
@@ -998,7 +1141,7 @@ def test_failed_section_does_not_delete_cached_homework(temp_db, monkeypatch):
     """A transient error must never prune a cached раздел."""
     from mt.api import Api, ApiError
     from mt.sync import SyncThread
-    from tests.fake_server import KBS_OFFLINE, SUBJECT_ID, TESTS_OFFLINE, FakeServer
+    from tests.fake_server import KBS_OFFLINE, SUBJECT2_ID, TESTS_OFFLINE, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-prune.json")
     monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
@@ -1008,8 +1151,7 @@ def test_failed_section_does_not_delete_cached_homework(temp_db, monkeypatch):
         api = Api()
         api.set_cookies({"sessionid": "valid"})
 
-        # first run caches both homeworks
-        first = SyncThread(api, [SUBJECT_ID])
+        first = SyncThread(api, [SUBJECT2_ID])
         first.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
         first.start()
         assert first.wait(30_000)
@@ -1024,7 +1166,7 @@ def test_failed_section_does_not_delete_cached_homework(temp_db, monkeypatch):
             return original(subject_id, kbs_id, mode)
 
         monkeypatch.setattr(api, "get_kbs_tests", flaky)
-        second = SyncThread(api, [SUBJECT_ID])
+        second = SyncThread(api, [SUBJECT2_ID])
         results: list = []
         second.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
         second.start()

@@ -63,7 +63,6 @@ from .pages import (
     HomeworkPage,
     KbsPage,
     LessonPage,
-    SubjectPage,
     TestPage,
 )
 
@@ -179,33 +178,55 @@ class Sidebar(QWidget):
 
     # ------------------------------------------------------------------ #
     def rebuild(self, palette: Palette) -> None:
+        """Предмет → урок → домашка → раздел."""
         expanded = {**self._expanded_state, **self._expanded_states()}
         self.tree.blockSignals(True)
         self.tree.clear()
         self.section_label.setText("ПРЕДМЕТЫ")
 
-        def add_homework(parent: QTreeWidgetItem, homework: dict[str, Any]) -> None:
-            total = int(homework.get("total") or 0)
-            supported = int(homework.get("supported") or 0)
+        def add_section(parent: QTreeWidgetItem, section: dict[str, Any]) -> None:
+            total = int(section.get("total") or 0)
+            supported = int(section.get("supported") or 0)
             item = QTreeWidgetItem([
-                homework.get("title") or f"Домашка #{homework['id']}",
+                section.get("title") or f"Раздел #{section['id']}",
                 f"{supported}/{total}" if total else "",
             ])
-            item.setData(0, Qt.ItemDataRole.UserRole, ("homework", int(homework["id"])))
+            item.setData(0, Qt.ItemDataRole.UserRole, ("kbs", int(section["id"])))
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             item.setForeground(1, QColor(palette.muted))
             item.setToolTip(
                 0,
-                f"{homework.get('title') or ''}\nДомашка #{homework['id']} · "
-                f"тестов {total} · с ответом {supported}",
+                f"{section.get('title') or ''}\nРаздел #{section['id']} · "
+                f"заданий {total} · с ответом {supported}",
             )
             parent.addChild(item)
+
+        def add_homework(parent: QTreeWidgetItem, homework: dict[str, Any]) -> None:
+            subject_id = int(homework["id"])
+            total = int(homework.get("total") or 0)
+            supported = int(homework.get("supported") or 0)
+            item = QTreeWidgetItem([
+                homework.get("title") or f"Домашка #{subject_id}",
+                f"{supported}/{total}" if total else "",
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, ("homework", subject_id))
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setForeground(1, QColor(palette.muted))
+            item.setToolTip(
+                0,
+                f"{homework.get('title') or ''}\nДомашка #{subject_id} · "
+                f"разделов {int(homework.get('sections') or 0)} · заданий {total}",
+            )
+            for section in db.homework_sections(subject_id):
+                add_section(item, section)
+            parent.addChild(item)
+            item.setExpanded(expanded.get(f"h{subject_id}", False))
 
         def add_lesson(parent: QTreeWidgetItem, lesson: dict[str, Any],
                        homeworks: list[dict[str, Any]]) -> None:
             meta = lesson_meta(lesson)
             title = meta.heading if meta.number is not None else (
-                lesson.get("title") or f"Занятие #{lesson['id']}"
+                lesson.get("title") or f"Урок #{lesson['id']}"
             )
             if meta.date_text:
                 title = f"{title} · {meta.date_text}"
@@ -221,16 +242,14 @@ class Sidebar(QWidget):
             for homework in homeworks:
                 add_homework(item, homework)
             parent.addChild(item)
-            item.setExpanded(expanded.get(f"l{lesson['id']}", False))
+            item.setExpanded(expanded.get(f"l{lesson['id']}", bool(homeworks)))
 
         count = 0
-        for course, _lessons in db.course_tree():
+        for course, lessons in db.course_lessons_tree():
             stats = {
                 "total": course.get("total") or 0,
                 "supported": course.get("supported") or 0,
-                "lessons": course.get("lesson_count") or 0,
             }
-            groups = db.course_homeworks(course["id"])
             item = QTreeWidgetItem([
                 course.get("title") or f"Предмет #{course['id']}",
                 f"{stats['supported']}/{stats['total']}",
@@ -240,8 +259,9 @@ class Sidebar(QWidget):
             item.setToolTip(
                 0,
                 f"{course.get('title') or ''}\nПредмет #{course['id']} · "
-                f"занятий {stats['lessons']} · тестов {stats['total']} · "
-                f"с ответом {stats['supported']}",
+                f"уроков {course.get('lesson_count') or 0} · "
+                f"домашек {course.get('homework_count') or 0} · "
+                f"заданий {stats['total']} · с ответом {stats['supported']}",
             )
             font = item.font(0)
             font.setBold(True)
@@ -249,63 +269,30 @@ class Sidebar(QWidget):
             item.setForeground(1, QColor(palette.muted))
             self.tree.addTopLevelItem(item)
             count += 1
-            for lesson, homeworks in groups["lessons"]:
+            for lesson, homeworks in lessons:
                 add_lesson(item, lesson, homeworks)
-            if groups["orphans"]:
-                extra = QTreeWidgetItem(["Домашки без занятия", ""])
-                extra.setForeground(0, QColor(palette.muted))
-                extra.setFlags(Qt.ItemFlag.ItemIsEnabled)
-                item.addChild(extra)
-                for homework in groups["orphans"]:
-                    add_homework(extra, homework)
             item.setExpanded(expanded.get(f"c{course['id']}", True))
 
-        in_courses = db.course_subject_ids()
-        for subject in db.list_subjects():
-            if subject["id"] in in_courses:
-                continue
-            counts = db.subject_stats(subject["id"])
-            groups = db.subject_homeworks(subject["id"])
-            item = QTreeWidgetItem([
-                subject["title"] or f"Предмет #{subject['id']}",
-                f"{counts['supported']}/{counts['total']}",
-            ])
-            item.setData(0, Qt.ItemDataRole.UserRole, ("subject", subject["id"]))
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            item.setToolTip(
-                0,
-                f"{subject['title']}\nID {subject['id']} · тестов {counts['total']} · "
-                f"с ответом {counts['supported']}",
-            )
-            font = item.font(0)
-            font.setBold(True)
-            item.setFont(0, font)
-            item.setForeground(1, QColor(palette.muted))
-            for lesson, homeworks in groups["lessons"]:
-                add_lesson(item, lesson, homeworks)
-            for homework in groups["orphans"]:
-                add_homework(item, homework)
-            self.tree.addTopLevelItem(item)
-            count += 1
-            item.setExpanded(expanded.get(str(subject["id"]), True))
-        self.tree.blockSignals(False)
+        standalone = db.standalone_homeworks()
+        if standalone:
+            caption = QTreeWidgetItem(["Домашки вне предметов", ""])
+            caption.setForeground(0, QColor(palette.muted))
+            caption.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.tree.addTopLevelItem(caption)
+            for homework in standalone:
+                add_homework(caption, homework)
+            caption.setExpanded(expanded.get("standalone", True))
 
+        self.tree.blockSignals(False)
         self.count_label.setText(str(count) if count else "")
         stats = db.overall_stats()
         if stats["total"]:
             self.footer_stats.setText(
-                f"{stats['total']:,} тестов · {stats['supported']:,} с ответом".replace(",", " ")
+                f"{stats['total']:,} заданий · {stats['supported']:,} с ответом".replace(",", " ")
             )
         else:
             self.footer_stats.setText("Кэш пуст")
-        if stats.get("courses"):
-            lessons = sum(course.get("lesson_count") or 0 for course in db.list_courses())
-            self.footer_hint.setText(
-                f"{stats['courses']} предм. · {lessons} занятий · "
-                f"{_short_time(stats['updated_at'])}"
-            )
-        else:
-            self.footer_hint.setText(f"Обновлено: {_short_time(stats['updated_at'])}")
+        self.footer_hint.setText(f"Обновлено: {_short_time(stats['updated_at'])}")
 
     def _expanded_states(self) -> dict[str, bool]:
         states: dict[str, bool] = {}
@@ -374,7 +361,7 @@ class Sidebar(QWidget):
         elif kind == "lesson":
             self.navigate.emit(f"lesson:{item_id}")
         elif kind == "subject":
-            self.navigate.emit(f"subject:{item_id}")
+            self.navigate.emit(f"homework:{item_id}")
         elif kind == "kbs":
             self.navigate.emit(f"kbs:{item_id}")
 
@@ -391,22 +378,19 @@ class Sidebar(QWidget):
             course = db.get_course(item_id) or {}
             menu.addAction(icons.icon("external", "#59616e", 16), "Открыть",
                            lambda: self.navigate.emit(f"course:{item_id}"))
-            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать курс",
+            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать предмет",
                            lambda: self.main.sync_course(item_id))
             menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
                            lambda: QGuiApplication.clipboard().setText(str(item_id)))
             menu.addSeparator()
-            menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить курс из кэша",
+            menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить предмет из кэша",
                            lambda: self.main.delete_course(item_id))
             menu.setToolTip(course.get("title") or "")
         elif kind == "homework":
-            homework = db.get_kbs(item_id) or {}
             menu.addAction(icons.icon("external", "#59616e", 16), "Открыть домашку",
                            lambda: self.navigate.emit(f"homework:{item_id}"))
-            menu.addAction(icons.icon("grid", "#59616e", 16), "Списком заданий",
-                           lambda: self.navigate.emit(f"kbs:{item_id}"))
-            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать предмет",
-                           lambda: self.main.sync_subject(homework.get("subject_id")))
+            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать домашку",
+                           lambda: self.main.sync_subject(item_id))
             menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
                            lambda: QGuiApplication.clipboard().setText(str(item_id)))
         elif kind == "lesson":
@@ -432,7 +416,7 @@ class Sidebar(QWidget):
             kbs = db.get_kbs(item_id) or {}
             menu.addAction(icons.icon("external", "#59616e", 16), "Открыть",
                            lambda: self.navigate.emit(f"kbs:{item_id}"))
-            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать предмет",
+            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать домашку",
                            lambda: self.main.sync_subject(kbs.get("subject_id")))
             menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
                            lambda: QGuiApplication.clipboard().setText(str(item_id)))
@@ -498,7 +482,7 @@ class MainWindow(QMainWindow):
         self.act_sync_selected = action("Синхронизировать", "refresh",
                                         self._sync_current_subject, "F5")
         self.act_sync_selected.setToolTip(
-            "Синхронизировать текущий курс, урок или предмет (F5)"
+            "Синхронизировать текущий предмет, урок или домашка (F5)"
         )
         self.act_sync_all = action("Синхронизировать всё", "refresh", self.sync_all)
         self.act_stop = action("Остановить", "close", self.stop_sync)
@@ -645,13 +629,12 @@ class MainWindow(QMainWindow):
         self.course_page = CoursePage(self)
         self.lesson_page = LessonPage(self)
         self.homework_page = HomeworkPage(self)
-        self.subject_page = SubjectPage(self)
         self.kbs_page = KbsPage(self)
         self.test_page = TestPage(self)
         self.all_page = AllTestsPage(self)
         for page in (self.dashboard_page, self.courses_page, self.course_page,
-                     self.lesson_page, self.homework_page, self.subject_page,
-                     self.kbs_page, self.test_page, self.all_page):
+                     self.lesson_page, self.homework_page, self.kbs_page,
+                     self.test_page, self.all_page):
             page.navigate.connect(self.navigate)
             self.stack.addWidget(page)
         splitter.addWidget(self.stack)
@@ -774,12 +757,10 @@ class MainWindow(QMainWindow):
 
     def _current_target(self) -> str | None:
         widget = self.stack.currentWidget()
-        if widget is self.subject_page and self.subject_page.subject_id:
-            return f"subject:{self.subject_page.subject_id}"
         if widget is self.course_page and self.course_page.course_id:
             return f"course:{self.course_page.course_id}"
-        if widget is self.homework_page and self.homework_page.kbs_id:
-            return f"homework:{self.homework_page.kbs_id}"
+        if widget is self.homework_page and self.homework_page.subject_id:
+            return f"homework:{self.homework_page.subject_id}"
         if widget is self.lesson_page and self.lesson_page.lesson_id:
             return f"lesson:{self.lesson_page.lesson_id}"
         if widget is self.kbs_page and self.kbs_page.kbs_id:
@@ -816,15 +797,15 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.course_page)
             self.sidebar.highlight("course")
             self.sidebar.select("course", course_id)
-        elif target.startswith("homework:"):
-            kbs_id = _to_int(target.split(":", 1)[1])
-            if kbs_id is None:
+        elif target.startswith(("homework:", "subject:")):  # subject = домашка
+            subject_id = _to_int(target.split(":", 1)[1])
+            if subject_id is None:
                 return
-            self.homework_page.show_homework(kbs_id)
+            self.homework_page.show_homework(subject_id)
             self.homework_page.scroll_to_top()
             self.stack.setCurrentWidget(self.homework_page)
             self.sidebar.highlight("")
-            self.sidebar.select("homework", kbs_id)
+            self.sidebar.select("homework", subject_id)
             self.status_label.setText("Готово")
             self._update_status()
             return
@@ -837,15 +818,6 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.lesson_page)
             self.sidebar.highlight("")
             self.sidebar.select("lesson", lesson_id)
-        elif target.startswith("subject:"):
-            subject_id = _to_int(target.split(":", 1)[1])
-            if subject_id is None:
-                return
-            self.subject_page.show_subject(subject_id)
-            self.subject_page.scroll_to_top()
-            self.stack.setCurrentWidget(self.subject_page)
-            self.sidebar.highlight("")
-            self.sidebar.select("subject", subject_id)
         elif target.startswith("kbs:"):
             kbs_id = _to_int(target.split(":", 1)[1])
             if kbs_id is None:
@@ -929,10 +901,8 @@ class MainWindow(QMainWindow):
             self.course_page.refresh()
         if self.lesson_page.lesson_id:
             self.lesson_page.refresh()
-        if self.homework_page.kbs_id:
+        if self.homework_page.subject_id:
             self.homework_page.refresh()
-        if self.subject_page.subject_id:
-            self.subject_page.refresh()
         if self.kbs_page.kbs_id:
             self.kbs_page.refresh()
         if self.test_page.test_id:
@@ -959,10 +929,8 @@ class MainWindow(QMainWindow):
         if widget is self.lesson_page and self.lesson_page.lesson_id:
             self.sync_lesson(self.lesson_page.lesson_id)
             return
-        if widget is self.homework_page and self.homework_page.kbs_id:
-            kbs = db.get_kbs(self.homework_page.kbs_id)
-            if kbs:
-                self.sync_subject(kbs["subject_id"])
+        if widget is self.homework_page and self.homework_page.subject_id:
+            self.sync_subject(self.homework_page.subject_id)
             return
         subject_id = self._current_subject_id()
         if subject_id is None:
@@ -972,14 +940,11 @@ class MainWindow(QMainWindow):
 
     def _current_subject_id(self) -> int | None:
         widget = self.stack.currentWidget()
-        if widget is self.subject_page:
-            return self.subject_page.subject_id
         if widget is self.kbs_page and self.kbs_page.kbs_id:
             kbs = db.get_kbs(self.kbs_page.kbs_id)
             return kbs["subject_id"] if kbs else None
-        if widget is self.homework_page and self.homework_page.kbs_id:
-            kbs = db.get_kbs(self.homework_page.kbs_id)
-            return int(kbs["subject_id"]) if kbs else None
+        if widget is self.homework_page and self.homework_page.subject_id:
+            return int(self.homework_page.subject_id)
         if widget is self.test_page and self.test_page.row:
             return int(self.test_page.row["subject_id"])
         item = self.sidebar.tree.currentItem()
@@ -1021,7 +986,7 @@ class MainWindow(QMainWindow):
         subject_ids = db.lesson_subject_ids(lesson_id)
         if not subject_ids:
             self.toast(
-                "В уроке нет загруженных практик — синхронизируйте курс", error=True
+                "В уроке нет загруженных домашек — синхронизируйте предмет", error=True
             )
             return
         if not self._ensure_cookies():
@@ -1083,7 +1048,7 @@ class MainWindow(QMainWindow):
         self.act_sync_all.setEnabled(False)
         self.status_label.setText("Синхронизация…")
         targets = [f"предмет {cid}" for cid in course_ids or []]
-        targets += [f"предмет {sid}" for sid in subject_ids]
+        targets += [f"домашка {sid}" for sid in subject_ids]
         self._append_log("— старт синхронизации: " + ", ".join(targets))
         thread.start()
 
@@ -1105,8 +1070,6 @@ class MainWindow(QMainWindow):
         if result.error:
             return
         self.sidebar.rebuild(self._pal)
-        if self.subject_page.subject_id == result.subject_id:
-            self.subject_page.refresh()
         if self.kbs_page.kbs_id:
             self.kbs_page.refresh()
         self.dashboard_page.refresh()
@@ -1136,11 +1099,11 @@ class MainWindow(QMainWindow):
                     f"{len(courses)} {_plural(len(courses), 'предмет', 'предмета', 'предметов')}"
                 )
                 parts.append(
-                    f"{lessons} {_plural(lessons, 'занятие', 'занятия', 'занятий')}"
+                    f"{lessons} {_plural(lessons, 'урок', 'урока', 'уроков')}"
                 )
             if plain:
                 parts.append(
-                    f"{len(plain)} {_plural(len(plain), 'раздел', 'раздела', 'разделов')}"
+                    f"{len(plain)} {_plural(len(plain), 'домашка', 'домашки', 'домашек')}"
                 )
             parts.append(f"{total_tests} {_plural(total_tests, 'тест', 'теста', 'тестов')}")
             if errors:
@@ -1179,7 +1142,7 @@ class MainWindow(QMainWindow):
         text, ok = QInputDialog.getText(
             self,
             "Добавить из ссылки",
-            "Вставьте ссылку на предмет, занятие или задание:\n"
+            "Вставьте ссылку на предмет, урок или задание:\n"
             "  • предмет: …/student/courses/111137/lessons\n"
             "  • задание: …/lesson/4772366/subjects/51610/practice/kbs/8931/tests/289165\n"
             "  • раздел: …/subjects/51610/",
@@ -1204,7 +1167,7 @@ class MainWindow(QMainWindow):
 
         if link.kind == "course":
             if link.course_id is None:
-                self.toast("В ссылке не найден ID курса", error=True)
+                self.toast("В ссылке не найден ID предмета", error=True)
                 return
             if not self._ensure_cookies():
                 return
@@ -1218,12 +1181,12 @@ class MainWindow(QMainWindow):
                 self.navigate(f"kbs:{kbs['id']}")
             else:
                 self.toast(
-                    "Раздел ещё не в кэше — вставьте ссылку на предмет или курс", error=True
+                    "Раздел ещё не в кэше — вставьте ссылку на предмет", error=True
                 )
             return
 
         if link.subject_id is None:
-            self.toast("В ссылке не найден предмет", error=True)
+            self.toast("В ссылке не найдена домашка", error=True)
             return
 
         # A task that is already cached opens instantly; the network is only
@@ -1334,21 +1297,16 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Удалить из кэша",
-            f"Удалить «{subject['title']}» и все его тесты из локального кэша?\n"
+            f"Удалить домашку «{subject['title']}» и все её задания из локального кэша?\n"
             "На сервере ничего не изменится.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         db.delete_subject(subject_id)
-        self.toast("Предмет удалён из кэша")
+        self.toast("Домашка удалена из кэша")
         self.refresh()
-        if self.subject_page.subject_id == subject_id:
-            if db.list_subjects():
-                self.navigate(f"subject:{db.list_subjects()[0]['id']}")
-            else:
-                self.navigate("dash")
-        elif self.kbs_page.kbs_id and not db.get_kbs(self.kbs_page.kbs_id) or self.test_page.test_id and not db.get_test(self.test_page.test_id):
+        if self.homework_page.subject_id == subject_id or self.kbs_page.kbs_id and db.get_kbs(self.kbs_page.kbs_id) is None or self.test_page.test_id and db.get_test(self.test_page.test_id) is None:
             self.navigate("dash")
 
     def delete_kbs(self, kbs_id: int) -> None:
@@ -1367,14 +1325,15 @@ class MainWindow(QMainWindow):
         self.toast("Раздел удалён из кэша")
         self.refresh()
         if self.kbs_page.kbs_id == kbs_id:
-            self.navigate(f"subject:{kbs['subject_id']}")
+            self.navigate(f"homework:{kbs['subject_id']}")
 
     def clear_cache_dialog(self) -> None:
         stats = db.overall_stats()
         answer = QMessageBox.question(
             self,
             "Очистить кэш",
-            f"Удалить все данные ({stats['subjects']} предметов, {stats['total']} тестов)?\n"
+            f"Удалить все данные ({stats['courses']} предметов, "
+            f"{stats['subjects']} домашек, {stats['total']} тестов)?\n"
             "Cookies останутся.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )

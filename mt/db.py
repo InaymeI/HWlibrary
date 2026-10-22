@@ -330,7 +330,7 @@ def upsert_course(cid: int, title: str, payload: dict[str, Any]) -> None:
                 payload_json = excluded.payload_json,
                 fetched_at   = excluded.fetched_at
             """,
-            (cid, title or f"Курс #{cid}", json.dumps(payload, ensure_ascii=False), now()),
+            (cid, title or f"Предмет #{cid}", json.dumps(payload, ensure_ascii=False), now()),
         )
 
 
@@ -348,12 +348,12 @@ def _course_stat_rows() -> list[dict[str, Any]]:
             (SELECT COUNT(*) FROM (
                 SELECT DISTINCT ls.subject_id FROM lessons l
                 JOIN lesson_subjects ls ON ls.lesson_id = l.id
-                WHERE l.course_id = c.id)) AS subject_count,
+                WHERE l.course_id = c.id)) AS homework_count,
             (SELECT COUNT(DISTINCT k.id) FROM knowledge_bases k
                 WHERE k.subject_id IN (
                     SELECT ls.subject_id FROM lessons l
                     JOIN lesson_subjects ls ON ls.lesson_id = l.id
-                    WHERE l.course_id = c.id)) AS homework_count
+                    WHERE l.course_id = c.id)) AS section_count
         FROM courses c
         ORDER BY c.title COLLATE NOCASE, c.id
         """
@@ -376,11 +376,30 @@ def _course_stat_rows() -> list[dict[str, Any]]:
     for row in rows:
         item = dict(row)
         item["lesson_count"] = item.get("lesson_count") or 0
-        item["subject_count"] = item.get("subject_count") or 0
         item["homework_count"] = item.get("homework_count") or 0
+        item["section_count"] = item.get("section_count") or 0
+        item["subject_count"] = item["homework_count"]  # backwards compatible name
         item["total"], item["supported"] = totals.get(int(item["id"]), (0, 0))
         result.append(item)
     return result
+
+
+def rename_course(cid: int, title: str) -> None:
+    with transaction() as conn:
+        conn.execute("UPDATE courses SET title = ? WHERE id = ?", (title, cid))
+
+
+def title_is_generic(title: str | None) -> bool:
+    """True for placeholders like «Предмет #111137» / «Домашка #777»."""
+    text = str(title or "").strip()
+    return not text or text.startswith(("Предмет #", "Курс #", "Домашка #", "Урок #"))
+
+
+def course_title_is_generic(cid: int) -> bool:
+    row = get_connection().execute(
+        "SELECT title FROM courses WHERE id = ?", (cid,)
+    ).fetchone()
+    return True if row is None else title_is_generic(row["title"])
 
 
 def list_courses() -> list[dict[str, Any]]:
@@ -390,10 +409,12 @@ def list_courses() -> list[dict[str, Any]]:
 def course_stats(cid: int) -> dict[str, int]:
     row = next((item for item in _course_stat_rows() if item["id"] == cid), None)
     if row is None:
-        return {"lessons": 0, "subjects": 0, "total": 0, "supported": 0}
+        return {"lessons": 0, "homeworks": 0, "sections": 0, "total": 0, "supported": 0}
     return {
         "lessons": row["lesson_count"],
-        "subjects": row["subject_count"],
+        "homeworks": row["homework_count"],
+        "sections": row["section_count"],
+        "subjects": row["homework_count"],
         "total": row["total"],
         "supported": row["supported"],
     }
@@ -501,7 +522,9 @@ def lesson_subjects(lesson_id: int) -> list[dict[str, Any]]:
     rows = []
     for row in get_connection().execute(sql, (lesson_id,)).fetchall():
         item = dict(row)
-        item["title"] = item.pop("subject_title") or item.pop("lesson_title") or f"Предмет #{item['id']}"
+        subject_title = item.pop("subject_title")
+        lesson_title = item.pop("lesson_title")
+        item["title"] = subject_title or lesson_title or f"Домашка #{item['id']}"
         item["total"] = item.get("total") or 0
         item["supported"] = item.get("supported") or 0
         rows.append(item)
@@ -526,7 +549,7 @@ def subject_course_path(subject_id: int) -> dict[str, Any] | None:
 
 
 def _kbs_rows_with_stats(subject_ids: list[int]) -> list[dict[str, Any]]:
-    """Knowledge bases (homeworks) of the given subjects with test counters."""
+    """Knowledge bases (sections) of the given homeworks, with test counters."""
     if not subject_ids:
         return []
     marks = ",".join("?" * len(subject_ids))
@@ -536,7 +559,7 @@ def _kbs_rows_with_stats(subject_ids: list[int]) -> list[dict[str, Any]]:
         LEFT JOIN tests t ON t.kbs_id = k.id
         WHERE k.subject_id IN ({marks})
         GROUP BY k.id
-        ORDER BY k.lesson_id IS NULL, k.lesson_id, k.id
+        ORDER BY k.id
     """
     rows = []
     for row in get_connection().execute(sql, subject_ids).fetchall():
@@ -548,7 +571,7 @@ def _kbs_rows_with_stats(subject_ids: list[int]) -> list[dict[str, Any]]:
 
 
 def subject_lessons(subject_id: int) -> list[dict[str, Any]]:
-    """Lessons (занятия) of a subject, in course order."""
+    """Lessons that contain this homework, in course order."""
     rows = get_connection().execute(
         """
         SELECT DISTINCT l.* FROM lessons l
@@ -561,51 +584,53 @@ def subject_lessons(subject_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _homework_select(where: str) -> str:
+    """Homeworks = «subjects» (practice blocks) with their counters.
+
+    A homework (subject) owns knowledge bases (sections), and a lesson owns
+    homeworks through ``lesson_subjects`` — that link comes from the lesson
+    structure and is the only reliable one (``knowledge_bases.lesson_id`` is
+    often empty or points at another entity).
+    """
+    return f"""
+        SELECT ls.subject_id AS id,
+               ls.lesson_id AS lesson_id,
+               ls.position AS position,
+               COALESCE(NULLIF(s.title, ''), NULLIF(ls.title, ''),
+                        'Домашка #' || ls.subject_id) AS title,
+               COALESCE(NULLIF(ls.title, ''), NULLIF(s.title, ''),
+                        'Домашка #' || ls.subject_id) AS lesson_subject_title,
+               (SELECT COUNT(*) FROM knowledge_bases k
+                    WHERE k.subject_id = ls.subject_id) AS sections,
+               (SELECT COUNT(*) FROM tests t
+                    WHERE t.subject_id = ls.subject_id) AS total,
+               (SELECT COALESCE({_supported_sum()}, 0) FROM tests t
+                    WHERE t.subject_id = ls.subject_id) AS supported
+        FROM lesson_subjects ls
+        LEFT JOIN subjects s ON s.id = ls.subject_id
+        {where}
+        ORDER BY ls.position, ls.subject_id
+    """
+
+
+def _run_homework_select(where: str, args: list[Any]) -> list[dict[str, Any]]:
+    rows = []
+    for row in get_connection().execute(_homework_select(where), args).fetchall():
+        item = dict(row)
+        item["sections"] = item.get("sections") or 0
+        item["total"] = item.get("total") or 0
+        item["supported"] = item.get("supported") or 0
+        rows.append(item)
+    return rows
+
+
 def lesson_homeworks(lesson_id: int) -> list[dict[str, Any]]:
-    """Homeworks (knowledge bases) that belong to a lesson.
-
-    The curriculum tree stores the *entity* lesson id in ``lesson_id``, which is
-    exactly the value kept in ``lessons.entity_lesson_id``.
-    """
-    lesson = get_lesson(lesson_id)
-    if not lesson or not lesson.get("entity_lesson_id"):
-        return []
-    subjects = [
-        int(row["id"]) for row in lesson_subjects(lesson_id)
-    ]
-    rows = _kbs_rows_with_stats(subjects)
-    return [row for row in rows if str(row.get("lesson_id")) == str(lesson["entity_lesson_id"])]
-
-
-def subject_homeworks(subject_id: int) -> dict[str, Any]:
-    """Lessons of a subject with their homeworks, plus unlinked homeworks.
-
-    This is what the subject page renders: «Занятие 1 · 3 сентября» with the
-    homework of that lesson inside.
-    """
-    lessons = subject_lessons(subject_id)
-    rows = _kbs_rows_with_stats([subject_id])
-    by_entity: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        key = str(row.get("lesson_id") or "")
-        if key:
-            by_entity.setdefault(key, []).append(row)
-
-    grouped: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-    used: set[int] = set()
-    for lesson in lessons:
-        key = str(lesson.get("entity_lesson_id") or "")
-        homeworks = by_entity.get(key, []) if key else []
-        used.update(int(homework["id"]) for homework in homeworks)
-        grouped.append((lesson, homeworks))
-    orphans = [row for row in rows if int(row["id"]) not in used]
-    if not grouped:
-        orphans = rows
-    return {"lessons": grouped, "orphans": orphans}
+    """Homeworks of a lesson: the practice blocks of its structure."""
+    return _run_homework_select("WHERE ls.lesson_id = ?", [int(lesson_id)])
 
 
 def course_homeworks(course_id: int) -> dict[str, Any]:
-    """Same grouping for a whole course (subjects of all of its lessons)."""
+    """Lessons of a course, each with its homeworks (practice blocks)."""
     lessons = [
         dict(row)
         for row in get_connection().execute(
@@ -613,61 +638,115 @@ def course_homeworks(course_id: int) -> dict[str, Any]:
             (course_id,),
         ).fetchall()
     ]
-    if not lessons:
-        return {"lessons": [], "orphans": []}
-    subject_ids = sorted({
-        int(row["subject_id"])
-        for row in get_connection().execute(
-            "SELECT DISTINCT ls.subject_id FROM lessons l"
-            " JOIN lesson_subjects ls ON ls.lesson_id = l.id WHERE l.course_id = ?",
-            (course_id,),
-        ).fetchall()
-    })
-    rows = _kbs_rows_with_stats(subject_ids)
-    by_entity: dict[str, list[dict[str, Any]]] = {}
+    grouped: dict[int, list[dict[str, Any]]] = {int(lesson["id"]): [] for lesson in lessons}
+    rows = _run_homework_select(
+        "WHERE ls.lesson_id IN (SELECT id FROM lessons WHERE course_id = ?)", [course_id]
+    )
     for row in rows:
-        key = str(row.get("lesson_id") or "")
-        if key:
-            by_entity.setdefault(key, []).append(row)
-    grouped = []
-    used: set[int] = set()
-    for lesson in lessons:
-        key = str(lesson.get("entity_lesson_id") or "")
-        homeworks = by_entity.get(key, []) if key else []
-        used.update(int(homework["id"]) for homework in homeworks)
-        grouped.append((lesson, homeworks))
-    orphans = [row for row in rows if int(row["id"]) not in used]
-    return {"lessons": grouped, "orphans": orphans}
+        grouped.setdefault(int(row["lesson_id"]), []).append(row)
+    return {
+        "lessons": [(lesson, grouped.get(int(lesson["id"]), [])) for lesson in lessons],
+        "homeworks": rows,
+    }
 
 
-def homework_tests(kbs_id: int) -> list[dict[str, Any]]:
-    """Tests of a homework in display order."""
-    return list_tests(kbs_id)
+def subject_homeworks(subject_id: int) -> dict[str, Any]:
+    """A homework («домашка» = subject) with its sections and lessons.
+
+    ``sections`` are knowledge bases; ``lessons`` are the lessons of any course
+    that contains this homework.  Kept under the old name because pages use it.
+    """
+    sections = _kbs_rows_with_stats([subject_id])
+    lessons = subject_lessons(subject_id)
+    return {"sections": sections, "lessons": lessons, "orphans": []}
 
 
-def homework_row(kbs_id: int) -> dict[str, Any] | None:
-    kbs = get_kbs(kbs_id)
-    if not kbs:
+def homework_sections(subject_id: int) -> list[dict[str, Any]]:
+    """Sections (knowledge bases) of a homework with test counters."""
+    return _kbs_rows_with_stats([subject_id])
+
+
+def homework_tests(subject_id: int) -> list[dict[str, Any]]:
+    """All tests of a homework, ordered by its sections."""
+    rows = get_connection().execute(
+        """
+        SELECT t.* FROM tests t
+        JOIN knowledge_bases k ON k.id = t.kbs_id
+        WHERE t.subject_id = ?
+        ORDER BY k.id, t.id
+        """,
+        (subject_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def homework_row(subject_id: int) -> dict[str, Any] | None:
+    """Homework header data: title, counters and where it sits."""
+    rows = _run_homework_select("WHERE ls.subject_id = ?", [int(subject_id)])
+    subject = get_subject(subject_id)
+    if not rows and not subject:
         return None
-    counts = kbs_stats(kbs_id)
-    kbs.update(counts)
-    lesson = None
-    if kbs.get("lesson_id"):
-        lesson = get_connection().execute(
-            "SELECT * FROM lessons WHERE entity_lesson_id = ?"
-            " ORDER BY course_id, position LIMIT 1",
-            (kbs["lesson_id"],),
-        ).fetchone()
-    kbs["lesson"] = dict(lesson) if lesson else None
-    return kbs
+    base = rows[0] if rows else {}
+    counts = subject_stats(subject_id)
+    homework = dict(base)
+    homework["id"] = int(subject_id)
+    homework["title"] = (
+        (subject or {}).get("title")
+        or base.get("title")
+        or f"Домашка #{subject_id}"
+    )
+    homework["sections"] = len(_kbs_rows_with_stats([subject_id]))
+    homework["total"] = counts["total"]
+    homework["supported"] = counts["supported"]
+    path = subject_course_path(subject_id)
+    homework["lesson"] = None
+    homework["course"] = None
+    if path:
+        homework["lesson"] = get_lesson(path["lesson_id"])
+        homework["course"] = get_course(path["course_id"])
+    return homework
 
 
-def subject_of_homework(kbs_id: int) -> dict[str, Any] | None:
-    row = get_connection().execute(
-        "SELECT * FROM subjects WHERE id = (SELECT subject_id FROM knowledge_bases WHERE id = ?)",
-        (kbs_id,),
-    ).fetchone()
-    return dict(row) if row else None
+def homework_lesson(subject_id: int) -> dict[str, Any] | None:
+    """The first lesson that contains this homework."""
+    path = subject_course_path(subject_id)
+    return get_lesson(path["lesson_id"]) if path else None
+
+
+def course_lessons_tree(course_id: int | None = None) -> list[tuple[dict[str, Any], list[tuple[dict[str, Any], list[dict[str, Any]]]]]]:
+    """Courses → lessons → homeworks, ready for the sidebar."""
+    result = []
+    for course in _course_stat_rows():
+        if course_id is not None and course["id"] != course_id:
+            continue
+        groups = course_homeworks(course["id"])
+        result.append((course, groups["lessons"]))
+    return result
+
+
+def standalone_homeworks() -> list[dict[str, Any]]:
+    """Homeworks that are not reachable through any course (synced by subject)."""
+    rows = get_connection().execute(
+        f"""
+        SELECT s.id AS id, s.title AS title,
+               (SELECT COUNT(*) FROM knowledge_bases k
+                    WHERE k.subject_id = s.id) AS sections,
+               (SELECT COUNT(*) FROM tests t WHERE t.subject_id = s.id) AS total,
+               (SELECT COALESCE({_supported_sum()}, 0) FROM tests t
+                    WHERE t.subject_id = s.id) AS supported
+        FROM subjects s
+        WHERE s.id NOT IN (SELECT DISTINCT subject_id FROM lesson_subjects)
+        ORDER BY s.title COLLATE NOCASE, s.id
+        """
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["sections"] = item.get("sections") or 0
+        item["total"] = item.get("total") or 0
+        item["supported"] = item.get("supported") or 0
+        result.append(item)
+    return result
 
 
 def course_subject_ids() -> set[int]:
@@ -697,42 +776,12 @@ def lesson_id_for_subject(subject_id: int) -> int | None:
 
 
 def course_lessons(course_id: int) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
-    """Lessons of a course in display order, each with its subjects."""
-    lessons = [
-        dict(row)
-        for row in get_connection().execute(
-            "SELECT * FROM lessons WHERE course_id = ? ORDER BY position, id",
-            (course_id,),
-        ).fetchall()
-    ]
-    if not lessons:
-        return []
-    marks = ",".join("?" * len(lessons))
-    grouped: dict[int, list[dict[str, Any]]] = {int(row["id"]): [] for row in lessons}
-    sql = f"""
-        SELECT ls.lesson_id, ls.subject_id AS id, ls.title AS lesson_title, ls.position,
-               s.title AS subject_title,
-               COUNT(t.id) AS total,
-               {_supported_sum()} AS supported
-        FROM lesson_subjects ls
-        LEFT JOIN subjects s ON s.id = ls.subject_id
-        LEFT JOIN tests t ON t.subject_id = ls.subject_id
-        WHERE ls.lesson_id IN ({marks})
-        GROUP BY ls.lesson_id, ls.subject_id
-        ORDER BY ls.position, ls.subject_id
-    """
-    lesson_ids = [int(row["id"]) for row in lessons]
-    for row in get_connection().execute(sql, lesson_ids).fetchall():
-        item = dict(row)
-        lesson_key = int(item.pop("lesson_id"))
-        grouped.setdefault(lesson_key, []).append({
-            "id": item["id"],
-            "title": item["subject_title"] or item["lesson_title"] or f"Предмет #{item['id']}",
-            "position": item["position"] or 0,
-            "total": item["total"] or 0,
-            "supported": item["supported"] or 0,
-        })
-    return [(lesson, grouped.get(int(lesson["id"]), [])) for lesson in lessons]
+    """Lessons of a course in display order, each with its homeworks."""
+    return db_course_homeworks_lessons(course_homeworks(course_id))
+
+
+def db_course_homeworks_lessons(groups: dict[str, Any]) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    return list(groups.get("lessons") or [])
 
 
 def course_tree() -> list[tuple[dict[str, Any], list[tuple[dict[str, Any], list[dict[str, Any]]]]]]:

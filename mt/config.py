@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "maximumtest-desktop"
 APP_TITLE = "MaximumTest Library"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 ORG_NAME = "maximumtest-desktop"
 
 # ``MT_*`` overrides are handy for development (demo databases, staging hosts).

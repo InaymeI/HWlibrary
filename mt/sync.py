@@ -29,6 +29,7 @@ from .models import (
     extract_lessons,
     extract_practice_blocks,
     extract_tests,
+    plural,
     subject_title,
 )
 
@@ -172,14 +173,22 @@ class SyncThread(QThread):
         started = time.monotonic()
         result = SyncResult(course_id=course_id)
         try:
-            self.log.emit(f"→ курс #{course_id}")
-            self.progress.emit(0, 1, f"курс #{course_id}")
+            self.log.emit(f"→ предмет #{course_id}")
+            self.progress.emit(0, 1, f"предмет #{course_id}")
             payload, lessons = self._fetch_course(course_id)
-            title = extract_course_title(payload, f"Курс #{course_id}")
+            title = extract_course_title(payload, "")
+            if not title:
+                # The payload may omit the name (or send only a number):
+                # keep a real cached name instead of showing «Предмет #111137».
+                cached = db.get_course(course_id)
+                if cached and not db.course_title_is_generic(course_id):
+                    title = str(cached["title"])
+                else:
+                    title = f"Предмет #{course_id}"
             if not lessons:
                 # «Ошибки и пустые ответы НЕ кэшировать».
-                result.error = "сервер вернул курс без уроков"
-                self.log.emit("  пустой ответ — кэш курса не изменён")
+                result.error = "сервер вернул предмет без уроков"
+                self.log.emit("  пустой ответ — кэш предмета не изменён")
                 return result
             db.upsert_course(course_id, title, payload if isinstance(payload, dict) else {})
             db.replace_course_lessons(course_id, [lesson.as_row() for lesson in lessons])
@@ -187,6 +196,7 @@ class SyncThread(QThread):
             self.log.emit(f"  «{title}» · уроков: {len(lessons)}")
 
             subject_ids: list[int] = []
+            subject_titles: dict[int, str] = {}
             for position, lesson in enumerate(lessons):
                 if self._stop:
                     result.cancelled = True
@@ -198,9 +208,10 @@ class SyncThread(QThread):
                     blocks = extract_practice_blocks(structure)
                     db.set_lesson_subjects(lesson.id, [block.as_row() for block in blocks])
                     for block in blocks:
+                        subject_titles.setdefault(block.subject_id, block.title)
                         if block.subject_id not in subject_ids:
                             subject_ids.append(block.subject_id)
-                    self.log.emit(f"  ▸ {lesson.title}: предметов {len(blocks)}")
+                    self.log.emit(f"  ▸ {lesson.title}: домашек {len(blocks)}")
                 except AuthError:
                     raise
                 except ApiError as exc:
@@ -221,9 +232,13 @@ class SyncThread(QThread):
                     self.log.emit("  остановлено пользователем")
                     break
                 self.progress.emit(
-                    len(lessons) + position, total, f"предмет #{subject_id}"
+                    len(lessons) + position, total, f"домашка #{subject_id}"
                 )
-                sub = self._sync_subject(subject_id, report_progress=False)
+                sub = self._sync_subject(
+                    subject_id,
+                    report_progress=False,
+                    title_hint=subject_titles.get(subject_id, ""),
+                )
                 result.subjects += 1
                 result.kbs += sub.kbs
                 result.tests += sub.tests
@@ -277,22 +292,29 @@ class SyncThread(QThread):
         return first, lessons
 
     # ------------------------------------------------------------------ #
-    def _sync_subject(self, subject_id: int, *, report_progress: bool = True) -> SyncResult:
+    def _sync_subject(
+        self, subject_id: int, *, report_progress: bool = True, title_hint: str = ""
+    ) -> SyncResult:
         started = time.monotonic()
         result = SyncResult(subject_id=subject_id)
         try:
-            self.log.emit(f"→ предмет #{subject_id}")
+            self.log.emit(f"→ домашка #{subject_id}")
             if report_progress:
-                self.progress.emit(0, 1, f"предмет #{subject_id}")
+                self.progress.emit(0, 1, f"домашка #{subject_id}")
             base = self.api.get_curriculum_subject(subject_id)
             title = subject_title(base, "")
             entries = [entry.as_row() for entry in extract_kbs_entries(base)]
             if not title and not entries:
                 # «Ошибки и пустые ответы НЕ кэшировать»: keep the previous data.
-                result.error = "сервер вернул пустой предмет"
+                result.error = "сервер вернул пустую домашку"
                 self.log.emit("  пустой ответ — кэш не изменён")
                 return result
-            title = title or f"Предмет #{subject_id}"
+            if db.title_is_generic(title):
+                # Keep a real name: from the lesson structure, the cache or the
+                # «Домашка #id» placeholder — in that order.
+                cached = db.get_subject(subject_id) or {}
+                hint = title_hint or str(cached.get("title") or "")
+                title = hint if not db.title_is_generic(hint) else f"Домашка #{subject_id}"
             db.upsert_subject(subject_id, title, base)
             self.log.emit(f"  «{title}»")
             self.log.emit(f"  разделов в дереве: {len(entries)}")
@@ -312,7 +334,7 @@ class SyncThread(QThread):
                     seen_ids.append(kid)
                     result.kbs += 1
                     result.tests += count
-                    self.log.emit(f"  ✓ раздел #{kid}: {count} тестов")
+                    self.log.emit(f"  ✓ раздел #{kid}: {count} {plural(count, 'тест', 'теста', 'тестов')}")
                 except AuthError:
                     raise
                 except ApiError as exc:

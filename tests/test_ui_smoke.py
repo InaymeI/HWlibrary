@@ -58,14 +58,14 @@ def subscribe(app, server, subject_id: int) -> None:
     from mt import db
     from mt.api import Api
     from mt.models import extract_kbs_entries, extract_tests, subject_title
-    from tests.fake_server import TESTS_OFFLINE, TESTS_ONLINE
+    from tests.fake_server import KBS_EXTRA, KBS_ONLINE, TESTS_EXTRA, TESTS_ONLINE
 
     api = Api()
     api.set_cookies({"sessionid": "valid"})
     base = api.get_curriculum_subject(subject_id)
     db.upsert_subject(subject_id, subject_title(base, "Тест"), base)
     for entry in extract_kbs_entries(base):
-        rows = TESTS_ONLINE if entry.id == 501 else TESTS_OFFLINE
+        rows = {KBS_ONLINE: TESTS_ONLINE, KBS_EXTRA: TESTS_EXTRA}.get(entry.id, [])
         db.upsert_kbs(entry.id, subject_id, entry.mode, entry.title, entry.lesson_id)
         db.replace_kbs_tests(
             entry.id,
@@ -238,25 +238,37 @@ def test_course_structure_appears_in_sidebar_and_pages(app, window):
         COURSE_ID,
         KBS_EXTRA,
         KBS_ONLINE,
+        LESSON2_DB_ID,
         LESSON_DB_ID,
         LESSON_ENTITY_ID,
+        SUBJECT2_ID,
+        SUBJECT_ID,
     )
 
     _subscribe_course(app, window)
 
     tree = window.sidebar.tree
-    assert tree.topLevelItemCount() == 1  # the practice subject is not a separate item
+    assert tree.topLevelItemCount() == 1  # only the предмет at the top level
     course_item = tree.topLevelItem(0)
     assert course_item.data(0, Qt.ItemDataRole.UserRole) == ("course", COURSE_ID)
     assert course_item.childCount() == 2
     lesson_item = course_item.child(0)
     assert lesson_item.data(0, Qt.ItemDataRole.UserRole) == ("lesson", LESSON_DB_ID)
-    # a lesson holds homeworks directly; there is no «subject» level any more
-    homework_ids = [
-        lesson_item.child(index).data(0, Qt.ItemDataRole.UserRole)[1]
-        for index in range(lesson_item.childCount())
+    # a lesson holds its домашку directly; the домашка holds разделы
+    homework_item = lesson_item.child(0)
+    assert homework_item.data(0, Qt.ItemDataRole.UserRole) == ("homework", SUBJECT_ID)
+    section_ids = [
+        homework_item.child(index).data(0, Qt.ItemDataRole.UserRole)[1]
+        for index in range(homework_item.childCount())
     ]
-    assert homework_ids == [KBS_ONLINE, KBS_EXTRA]
+    assert section_ids == [KBS_ONLINE, KBS_EXTRA]
+    # the second lesson has its own домашка — the bug the user reported
+    assert course_item.child(1).data(0, Qt.ItemDataRole.UserRole) == (
+        "lesson", LESSON2_DB_ID
+    )
+    assert course_item.child(1).child(0).data(0, Qt.ItemDataRole.UserRole) == (
+        "homework", SUBJECT2_ID
+    )
 
     window.navigate("courses")
     assert window.stack.currentWidget() is window.courses_page
@@ -264,9 +276,9 @@ def test_course_structure_appears_in_sidebar_and_pages(app, window):
     assert window.stack.currentWidget() is window.course_page
     window.navigate(f"lesson:{LESSON_DB_ID}")
     assert window.stack.currentWidget() is window.lesson_page
-    window.navigate(f"homework:{KBS_ONLINE}")
+    window.navigate(f"homework:{SUBJECT_ID}")
     assert window.stack.currentWidget() is window.homework_page
-    assert window.homework_page.chip_count() == 5
+    assert window.homework_page.chip_count() == 6
 
     window.navigate("test:1001")
     app.processEvents()
@@ -299,7 +311,7 @@ def test_course_link_starts_full_sync(app, window):
     _wait_sync(app, window)
 
     assert db.get_course(COURSE_ID) is not None
-    assert db.course_stats(COURSE_ID)["subjects"] == 1
+    assert db.course_stats(COURSE_ID)["homeworks"] == 2
     window.navigate(f"course:{COURSE_ID}")
     assert window.stack.currentWidget() is window.course_page
 
@@ -323,57 +335,72 @@ def test_task_link_syncs_subject_and_then_opens_test(app, window):
     assert window._pending_test is None
 
 
-def test_subject_page_shows_lessons_with_homework(app, window):
-    """The subject page looks like the site: «Занятие N · date» + homework."""
+def test_lesson_page_lists_its_homeworks(app, window):
+    """A lesson page shows the домашку of that lesson — the reported bug."""
+    from mt.widgets import ListRow
+    from tests.fake_server import (
+        COURSE_ID,
+        LESSON2_DB_ID,
+        LESSON_DB_ID,
+    )
 
     _subscribe_course(app, window)
-    window.navigate("subject:777")
-    app.processEvents()
-    page = window.subject_page
-    cards = [page.body.itemAt(index).widget() for index in range(page.body.count())]
-    cards = [card for card in cards if isinstance(card, LessonCard)]
-    # только занятия, где у этого предмета есть практика
-    assert len(cards) == 1
-    first = cards[0]
-    assert first.meta.heading == "Занятие 1"
-    assert first.meta.date_text == "3 сентября"
-    assert first.meta.status == "Посещено"
-    assert first.meta.progress == 100
-    assert first.meta.topics
-    rows = [
-        first.homework_box.layout().itemAt(index).widget()
-        for index in range(first.homework_box.layout().count())
-    ]
-    assert len(rows) == 2  # both homeworks belong to this lesson
 
-    # на странице предмета видны все занятия курса, включая теоретические
-    window.navigate("course:111137")
+    def rows(page):
+        widgets = [page.body.itemAt(index).widget() for index in range(page.body.count())]
+        return [widget for widget in widgets if isinstance(widget, ListRow)]
+
+    window.navigate(f"lesson:{LESSON_DB_ID}")
+    page = window.lesson_page
+    assert page.header.title.text() == "Урок 1"
+    first = rows(page)
+    assert len(first) == 1
+    assert first[0].title_label.text() == "Домашка №1"
+    assert "2 раздела" in (first[0].subtitle_label.text() if first[0].subtitle_label else "")
+    assert "6 тестов" in (first[0].subtitle_label.text() if first[0].subtitle_label else "")
+
+    window.navigate(f"lesson:{LESSON2_DB_ID}")
+    second = rows(page)
+    assert [row.title_label.text() for row in second] == ["Домашка №2"]
+
+    # the course page lists every lesson with its домашкой inside
+    window.navigate(f"course:{COURSE_ID}")
     app.processEvents()
-    course_cards = [
+    cards = [
         window.course_page.body.itemAt(index).widget()
         for index in range(window.course_page.body.count())
     ]
-    course_cards = [card for card in course_cards if isinstance(card, LessonCard)]
-    assert len(course_cards) == 2
-    assert course_cards[1].meta.heading == "Занятие 2"
+    cards = [card for card in cards if isinstance(card, LessonCard)]
+    assert len(cards) == 2
+    assert cards[0].meta.heading == "Урок 1"
+    assert cards[0].meta.date_text == "3 сентября"
+    assert cards[0].meta.status == "Посещено"
+    assert cards[0].meta.progress == 100
+    assert cards[0].meta.topics
+    assert cards[1].meta.heading == "Урок 2"
+    nested = [
+        cards[0].homework_box.layout().itemAt(index).widget()
+        for index in range(cards[0].homework_box.layout().count())
+    ]
+    assert [row.title_label.text() for row in nested] == ["Домашка №1"]
 
 
 def test_homework_page_has_numbered_chips(app, window):
-    """Numbers on top switch tests inside the homework."""
-    from tests.fake_server import KBS_ONLINE, TESTS_ONLINE
+    """Numbers on top switch tests of the whole домашку (all её разделы)."""
+    from tests.fake_server import SUBJECT_ID, TESTS_EXTRA, TESTS_ONLINE
 
     _subscribe_course(app, window)
-    window.navigate(f"homework:{KBS_ONLINE}")
+    window.navigate(f"homework:{SUBJECT_ID}")
     app.processEvents()
     page = window.homework_page
-    assert page.chip_count() == len(TESTS_ONLINE)
+    assert page.chip_count() == len(TESTS_ONLINE) + len(TESTS_EXTRA)
     assert page.index == 0
 
     page.open_test_at(3)
     app.processEvents()
     assert page.index == 3
     assert page._tests[3]["id"] == TESTS_ONLINE[3]["id"]
-    assert window._current_target() == f"homework:{KBS_ONLINE}"
+    assert window._current_target() == f"homework:{SUBJECT_ID}"
 
     page.go_next()
     page.go_previous()
@@ -389,11 +416,11 @@ def test_homework_page_has_numbered_chips(app, window):
 
 def test_homework_page_without_tests_shows_empty_state(app, window):
     from mt import db
-    from tests.fake_server import KBS_OFFLINE
+    from tests.fake_server import KBS_OFFLINE, SUBJECT2_ID
 
     _subscribe_course(app, window)
-    db.replace_kbs_tests(KBS_OFFLINE, 777, [])
-    window.navigate(f"homework:{KBS_OFFLINE}")
+    db.replace_kbs_tests(KBS_OFFLINE, SUBJECT2_ID, [])
+    window.navigate(f"homework:{SUBJECT2_ID}")
     app.processEvents()
     assert window.homework_page.chip_count() == 0
 

@@ -66,11 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", metavar="DIR", help="каталог данных (вместо XDG)")
     parser.add_argument("--theme", choices=("light", "dark", "system"), help="тема оформления")
     parser.add_argument("--sync", metavar="SUBJECT_ID", type=int,
-                        help="синхронизировать предмет и выйти")
+                        help="синхронизировать домашку (subject id) и выйти")
     parser.add_argument("--course", metavar="COURSE_ID", type=int,
-                        help="синхронизировать курс (уроки, практики, задания) и выйти")
+                        help="синхронизировать предмет (уроки, домашки, задания) и выйти")
     parser.add_argument("--link", metavar="URL",
-                        help="ссылка на курс, предмет или задание — синхронизировать и выйти")
+                        help="ссылка на предмет, урок или задание — синхронизировать и выйти")
     args = parser.parse_args(argv)
 
     if args.data_dir:
@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_sync([], [link.course_id])
         if link.subject_id:
             return _run_sync([link.subject_id], [])
-        print("В ссылке не найден предмет или курс", file=sys.stderr)
+        print("В ссылке не найдена домашка", file=sys.stderr)
         return 2
     if args.course:
         return _run_sync([], [args.course])
@@ -175,14 +175,14 @@ def _run_sync(subject_ids: list[int], course_ids: list[int] | None = None) -> in
         if result.course_id:
             stats = db.course_stats(result.course_id)
             print(
-                f"Курс #{result.course_id}: уроков {result.lessons}, "
-                f"предметов {stats['subjects']} · тестов {stats['total']}, "
-                f"с ответом {stats['supported']}"
+                f"Предмет #{result.course_id}: уроков {result.lessons} · "
+                f"домашек {stats['homeworks']} · разделов {stats['sections']} · "
+                f"тестов {stats['total']}, с ответом {stats['supported']}"
             )
         else:
             stats = db.subject_stats(result.subject_id)
             print(
-                f"Предмет #{result.subject_id}: разделов {stats['kbs']} · "
+                f"Домашка #{result.subject_id}: разделов {stats['kbs']} · "
                 f"тестов {stats['total']}, с ответом {stats['supported']}"
             )
     if not failed:

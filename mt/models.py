@@ -97,6 +97,74 @@ class TestDetails:
         return bool(self.right_options)
 
 
+#: Keys that usually carry a human readable name, best first.
+_TITLE_KEYS = (
+    "title", "name", "caption", "displayName", "display_name", "shortName",
+    "fullName", "subjectName", "subject_name", "lessonName", "courseName",
+    "label", "heading",
+)
+#: Strings that are just numbers/ids must never be shown as a name.
+_NUMERIC_RE = re.compile(r"^[\s\d/._#-]+$")
+
+
+def looks_like_id(text: str) -> bool:
+    """True for "12345", "#12345", "id 42" and other non-names."""
+    value = (text or "").strip()
+    if not value:
+        return True
+    if _NUMERIC_RE.match(value):
+        return True
+    lowered = value.lower()
+    return lowered.startswith(("id ", "id#", "id:")) and _NUMERIC_RE.match(value[3:])
+
+
+def pick_title(node: Any, *, depth: int = 0) -> str:
+    """Find a human readable name anywhere inside an API object.
+
+    The backend spreads names over ``title``/``name``/``entityInfo`` and a few
+    nested containers, so a shallow lookup often fails and the UI ends up with
+    «Предмет #111137».  This walks the object (breadth-first, bounded) and
+    returns the first plausible name — never a bare number.
+    """
+    if depth > 4 or node is None:
+        return ""
+    if isinstance(node, str):
+        text = strip_html(node)
+        return "" if looks_like_id(text) else text
+    if isinstance(node, list):
+        for item in node:
+            found = pick_title(item, depth=depth + 1)
+            if found:
+                return found
+        return ""
+    if not isinstance(node, dict):
+        return ""
+
+    for key in _TITLE_KEYS:
+        value = node.get(key)
+        if isinstance(value, str):
+            text = strip_html(value)
+            if text and not looks_like_id(text):
+                return text
+
+    # Preferred nested containers first, then everything else.
+    for key in ("entityInfo", "entity_info", "educationTest", "course", "group",
+                "educationGroup", "education_group", "data", "result", "meta",
+                "lesson", "subject", "curriculum"):
+        value = node.get(key)
+        if isinstance(value, (dict, list)):
+            found = pick_title(value, depth=depth + 1)
+            if found:
+                return found
+    for key, value in node.items():
+        if key in _TITLE_KEYS or not isinstance(value, (dict, list)):
+            continue
+        found = pick_title(value, depth=depth + 1)
+        if found:
+            return found
+    return ""
+
+
 def _variant_list(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -436,12 +504,26 @@ def extract_tests(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def subject_title(payload: dict[str, Any] | None, fallback: str) -> str:
-    if isinstance(payload, dict):
-        for key in ("title", "name", "subjectName", "caption"):
-            value = payload.get(key)
-            if value:
-                return strip_html(value) or fallback
+def subject_title(payload: dict[str, Any] | None, fallback: str = "") -> str:
+    """Name of a homework («домашка» = subject); never a bare id.
+
+    Only the subject-ish fields are read: a wildcard search would happily
+    return the name of its first section («Раздел 1») and rename the домашка.
+    """
+    if not isinstance(payload, dict):
+        return fallback
+    for key in ("title", "name", "subjectName", "subject_name", "caption", "displayName"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            text = strip_html(value)
+            if text and not looks_like_id(text):
+                return text
+    for key in ("subject", "entityInfo", "entity_info", "data", "meta"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            title = subject_title(value, "")
+            if title:
+                return title
     return fallback
 
 
@@ -539,13 +621,7 @@ def extract_lessons(payload: Any) -> list[LessonEntry]:
         if lesson_id is None or lesson_id in seen:
             continue
         seen.add(lesson_id)
-        title = strip_html(
-            item.get("title")
-            or item.get("name")
-            or entity.get("title")
-            or entity.get("name")
-            or ""
-        )
+        title = pick_title(item)
         position = _as_int(item.get("position") or item.get("sort") or item.get("order"))
         lessons.append(
             LessonEntry(
@@ -580,18 +656,12 @@ def _practice_blocks_in(node: Any, out: list[PracticeBlock], depth: int = 0) -> 
     )
     is_practice = kind in ("curriculum_practice_block", "practice_block", "curriculum_practice")
     if is_practice and subject_id is not None:
-        title = strip_html(
-            entity.get("title")
-            or entity.get("name")
-            or node.get("title")
-            or node.get("name")
-            or ""
-        )
+        title = pick_title(node)
         position = _as_int(node.get("position") or node.get("sort") or node.get("order"))
         out.append(
             PracticeBlock(
                 subject_id=subject_id,
-                title=title or f"Практика #{subject_id}",
+                title=title or f"Домашка #{subject_id}",
                 position=len(out) if position is None else position,
             )
         )
@@ -611,17 +681,63 @@ def extract_practice_blocks(payload: Any) -> list[PracticeBlock]:
     return list(unique.values())
 
 
-def extract_course_title(payload: Any, fallback: str) -> str:
-    """Best-effort course name; the API may omit it entirely."""
+def extract_course_title(payload: Any, fallback: str = "") -> str:
+    """Name of a course («предмет»), never a bare id.
+
+    The education-groups payload usually carries the course name at the top
+    level (``title``/``name``) or inside a course-ish container.  Lesson items
+    are only used for *course* fields — taking a lesson's own title would
+    label the whole subject with one lesson's name.
+    """
+    course_keys = (
+        "courseName", "course_name", "groupName", "group_name",
+        "educationGroupName", "education_group_name",
+    )
     if isinstance(payload, dict):
-        for key in ("title", "name", "caption", "courseName"):
+        # 1. Root level name.
+        for key in ("title", "name", "caption", "displayName", "display_name", "fullName"):
             value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return strip_html(value) or fallback
-        for key in ("course", "group", "educationGroup", "meta", "data"):
+            if isinstance(value, str):
+                text = strip_html(value)
+                if text and not looks_like_id(text):
+                    return text
+        for key in course_keys:
+            value = payload.get(key)
+            if isinstance(value, str):
+                text = strip_html(value)
+                if text and not looks_like_id(text):
+                    return text
+        # 2. Course-ish containers at the root.
+        for key in ("course", "group", "educationGroup", "education_group",
+                    "entityInfo", "entity_info", "meta", "curriculum"):
             value = payload.get(key)
             if isinstance(value, dict):
                 title = extract_course_title(value, "")
+                if title:
+                    return title
+        # 3. Course fields of the lesson items.
+        for item in _payload_list(payload):
+            if not isinstance(item, dict):
+                continue
+            entity = item.get("entityInfo") or item.get("entity_info") or {}
+            if not isinstance(entity, dict):
+                entity = {}
+            for source in (item, entity):
+                for key in course_keys:
+                    value = source.get(key)
+                    if isinstance(value, str):
+                        text = strip_html(value)
+                        if text and not looks_like_id(text):
+                            return text
+                for nested_key in ("course", "educationGroup", "education_group", "group"):
+                    nested = source.get(nested_key)
+                    if isinstance(nested, dict):
+                        title = extract_course_title(nested, "")
+                        if title:
+                            return title
+            # A single-lesson course page may name the course after its lesson.
+            if entity.get("type") in ("course", "education_group") or item.get("type") == "course":
+                title = pick_title(item)
                 if title:
                     return title
     return fallback
@@ -753,8 +869,8 @@ class LessonMeta:
     @property
     def heading(self) -> str:
         if self.number is not None:
-            return f"Занятие {self.number}"
-        return self.title or "Занятие"
+            return f"Урок {self.number}"
+        return self.title or "Урок"
 
     @property
     def online(self) -> bool:
@@ -817,6 +933,16 @@ def lesson_meta(row: dict[str, Any], payload: dict[str, Any] | None = None) -> L
 
 def test_title(row: dict[str, Any]) -> str:
     return str(row.get("title") or f"Тест #{row.get('id')}")
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Russian plural form for *n*: 1 тест, 2 теста, 5 тестов."""
+    value = abs(int(n))
+    if value % 10 == 1 and value % 100 != 11:
+        return one
+    if 2 <= value % 10 <= 4 and not 12 <= value % 100 <= 14:
+        return few
+    return many
 
 
 def relative_time(timestamp: int | float | None) -> str:
