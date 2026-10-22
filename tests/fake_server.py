@@ -13,8 +13,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 SUBJECT_ID = 777
+SUBJECT_TITLE = "Тестовый предмет"
 KBS_ONLINE = 501
 KBS_OFFLINE = 502
+#: second homework of the first lesson — one lesson may have several
+KBS_EXTRA = 503
 
 #: Course used by the course-structure tests (v3 education-groups API).
 COURSE_ID = 111137
@@ -29,14 +32,28 @@ LESSONS_PAYLOAD = {
         {
             "id": LESSON_DB_ID,
             "position": 1,
+            "number": 1,
             "title": "Урок 1. Практика",
+            "date": "2025-09-03T19:40:00",
+            "visited": True,
+            "progress": {"percent": 100},
+            "timeStart": "19:40",
+            "timeEnd": "21:10",
+            "topics": ["VIII–XV вв. Судьбы Русских земель", "Дополнительные материалы"],
             "entityInfo": {"id": LESSON_ENTITY_ID, "title": "Практика"},
             "type": "lesson",
         },
         {
             "id": LESSON2_DB_ID,
             "position": 2,
+            "number": 2,
             "title": "Урок 2. Только теория",
+            "date": "2025-09-10T19:40:00",
+            "status": "viewed",
+            "progress": 100,
+            "timeStart": "19:40",
+            "timeEnd": "21:10",
+            "topics": ["XV–XVI вв. Феодальные войны и грозный царь"],
             "entityInfo": {"id": LESSON2_ENTITY_ID, "title": "Теория"},
             "type": "lesson",
         },
@@ -99,6 +116,12 @@ TESTS_ONLINE = [
         {"id": 51, "variants": ["x"], "isRightAnswer": True},
     ]),
 ]
+TESTS_EXTRA = [
+    _test(3001, "type1", "Доп. задание 1", [
+        {"id": 71, "variants": ["верно"], "isRightAnswer": True, "sort": 1},
+        {"id": 72, "variants": ["неверно"], "isRightAnswer": False, "sort": 2},
+    ]),
+]
 TESTS_OFFLINE = [
     _test(2001, "type1", "Офлайн задание", [
         {"id": 61, "variants": ["да"], "isRightAnswer": True},
@@ -156,11 +179,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == f"/api/v1/content/practice/curriculumsubject/{SUBJECT_ID}":
             self._send(200, {
                 "id": SUBJECT_ID,
-                "title": "Тестовый предмет",
+                "title": SUBJECT_TITLE,
                 "tree": {
                     "online": [
-                        {"id": KBS_ONLINE, "title": "Раздел онлайн", "lessonId": 9001},
-                        {"id": KBS_OFFLINE, "title": "Раздел офлайн", "lessonId": 9002},
+                        {"id": KBS_ONLINE, "title": "Домашка 1", "lessonId": LESSON_ENTITY_ID},
+                        {"id": KBS_EXTRA, "title": "Домашка 2", "lessonId": LESSON_ENTITY_ID},
+                        {"id": KBS_OFFLINE, "title": "Домашка 3", "lessonId": LESSON2_ENTITY_ID},
                     ],
                     "offline": [],
                     "aftertheory": [],
@@ -169,6 +193,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         for kbs_id, mode, tests in (
             (KBS_ONLINE, "online", TESTS_ONLINE),
+            (KBS_EXTRA, "online", TESTS_EXTRA),
             (KBS_OFFLINE, "offline", TESTS_OFFLINE),
         ):
             if path == (

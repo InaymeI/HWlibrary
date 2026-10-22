@@ -5,26 +5,34 @@
 серверы и не требует пароля — доступ к заданиям выполняется через cookies вашей
 сессии в браузере.
 
-![Курс](docs/screenshot-course.png)
+![Предмет](docs/screenshot-course.png)
 
 <p align="center">
-  <img src="docs/screenshot-courses.png" width="49%" alt="Курсы">
-  <img src="docs/screenshot-test.png" width="49%" alt="Задание">
+  <img src="docs/screenshot-homework.png" width="49%" alt="Домашка">
+  <img src="docs/screenshot-courses.png" width="49%" alt="Предметы">
 </p>
 
 <p align="center">
-  <img src="docs/screenshot-subject.png" width="49%" alt="Предмет">
+  <img src="docs/screenshot-test.png" width="49%" alt="Задание">
   <img src="docs/screenshot-dark.png" width="49%" alt="Тёмная тема">
 </p>
 
 ## Что умеет
 
-- **Вся структура курса из одной ссылки.** Вставьте адрес страницы курса
-  (`/student/courses/111137/lessons`) — приложение прочитает уроки
-  (`education-groups`), структуру каждого урока (`structures`), найдёт блоки
-  `curriculum_practice_block` (это предметы) и скачает все их разделы и задания.
-- **Дерево «курс → урок → предмет → раздел»** в боковой панели и отдельные
-  страницы курсов/уроков со счётчиками «с ответом / всего».
+- **Предмет целиком из одной ссылки.** Вставьте адрес страницы предмета
+  (`/student/courses/111137/lessons`) — приложение прочитает занятия
+  (`education-groups`), структуру каждого занятия (`structures`), найдёт блоки
+  `curriculum_practice_block` и скачает все домашки со всеми заданиями.
+  Внутренние «практики» остаются деталью хранения и в интерфейсе не показываются.
+- **Страница предмета как на сайте.** Карточки занятий: дата, статус
+  («Посещено» / «Просмотрено»), прогресс по ДЗ с полосой, темы занятия и список
+  домашек внутри. Темы/даты берутся из ответа API и показываются, если сервер
+  их присылает.
+- **Домашка как тренажёр.** Сверху — пронумерованные кнопки всех тестов
+  (текущий обведён, решённые подсвечены), ниже условие, варианты с отметками
+  верных ответов и кнопки «Назад / Далее / Открыть задание».
+- **Дерево «предмет → занятие → домашка»** в боковой панели со счётчиками
+  «с ответом / всего».
 - **Ссылка на задание** (`/lesson/4772366/subjects/51610/practice/kbs/8931/tests/289165?type=online`)
   разбирается целиком: курс, урок, предмет, раздел, режим и номер задания.
   Если задание уже в кэше — оно сразу откроется, иначе скачается его предмет.
@@ -120,8 +128,9 @@ python -m venv .venv
 
 | Что | Реализация |
 | --- | --- |
-| Уроки курса | `GET /api/v3/student/education-groups/{courseId}?perPage=50&page=N`; пагинация по `meta.last_page`, дубли по `id` отбрасываются |
-| Структура урока | `GET /api/v3/student/education-groups/{courseId}/structures/{lessonId}`; из `data.children` берутся блоки `curriculum_practice_block`, их `entityInfo.id` — это `subjectId` |
+| Занятия предмета | `GET /api/v3/student/education-groups/{courseId}?perPage=50&page=N`; пагинация по `meta.last_page`, дубли по `id` отбрасываются |
+| Структура занятия | `GET /api/v3/student/education-groups/{courseId}/structures/{lessonId}`; из `data.children` берутся блоки `curriculum_practice_block`, их `entityInfo.id` — это `subjectId` |
+| Привязка домашки к занятию | `lessonId` домашки в дереве предмета = `entityInfo.id` занятия (`lessons.entity_lesson_id`); домашки без `lessonId` показываются отдельным блоком и не теряются |
 | `entity lesson id` | `entityInfo.id` урока; именно он идёт в `lessonId` тела ответа |
 | Дерево предмета | `GET /curriculumsubject/{sid}`; обход `online → offline → aftertheory`, `lessonId` сохраняется |
 | Тесты раздела | `GET /…/knowledgebase/{kbs}/{mode}/tests`, режимы перебираются по порядку `kbs.mode → online → offline → aftertheory`, берётся первый массив |
@@ -149,7 +158,7 @@ python -m mt --sync 1234                  # синхронизировать п�
 
 ```bash
 ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/python -m pytest            # 45 тестов, включая фиктивный сервер
+./.venv/bin/python -m pytest            # 52 теста, включая фиктивный сервер
 ./.venv/bin/python -m ruff check mt tests
 ```
 
@@ -162,7 +171,7 @@ python -m mt --sync 1234                  # синхронизировать п�
 ```
 mt/
 ├── __main__.py      точка входа, CLI (--sync/--course/--link), Wayland-детект, excepthook
-├── links.py         разбор ссылок: курс, урок, предмет, раздел, задание
+├── links.py         разбор ссылок: предмет, занятие, раздел, задание
 ├── config.py        пути, эндпоинты, константы (без побочных эффектов при импорте)
 ├── db.py            SQLite-кэш: схема, миграции, запросы, агрегаты
 ├── api.py           HTTP-клиент: ретраи, таймауты, безопасное хранение cookies

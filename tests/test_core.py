@@ -259,7 +259,15 @@ def test_tree_data_groups_counts(temp_db):
 def test_sync_pipeline_end_to_end(temp_db, monkeypatch):
     from mt.api import Api
     from mt.sync import SyncThread
-    from tests.fake_server import KBS_OFFLINE, KBS_ONLINE, SUBJECT_ID, FakeServer
+    from tests.fake_server import (
+        KBS_EXTRA,
+        KBS_OFFLINE,
+        KBS_ONLINE,
+        LESSON2_ENTITY_ID,
+        LESSON_ENTITY_ID,
+        SUBJECT_ID,
+        FakeServer,
+    )
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-test.json")
     monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
@@ -279,18 +287,21 @@ def test_sync_pipeline_end_to_end(temp_db, monkeypatch):
         assert results, "sync thread did not finish"
         result = results[0]
         assert result.error is None
-        assert result.kbs == 2
-        assert result.tests == 6
+        assert result.kbs == 3
+        assert result.tests == 7
         assert result.errors == 0
 
         subject = db.get_subject(SUBJECT_ID)
         assert subject["title"] == "Тестовый предмет"
-        assert {row["id"] for row in db.list_kbs(SUBJECT_ID)} == {KBS_ONLINE, KBS_OFFLINE}
+        assert {row["id"] for row in db.list_kbs(SUBJECT_ID)} == {
+            KBS_ONLINE, KBS_EXTRA, KBS_OFFLINE
+        }
         assert db.kbs_stats(KBS_ONLINE)["total"] == 5
         assert db.kbs_stats(KBS_OFFLINE)["total"] == 1
         # the fallback mode probe must not leave duplicate tests behind
         assert len(db.list_tests(KBS_OFFLINE)) == 1
-        assert db.get_kbs(KBS_OFFLINE)["lesson_id"] == 9002
+        assert db.get_kbs(KBS_OFFLINE)["lesson_id"] == LESSON2_ENTITY_ID
+        assert db.get_kbs(KBS_ONLINE)["lesson_id"] == LESSON_ENTITY_ID
 
         # answering uses the endpoint from the API docs
         response = api.post_answer(SUBJECT_ID, 9001, 1001, ["11"], 42)
@@ -701,6 +712,7 @@ def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
         LESSON_DB_ID,
         LESSON_ENTITY_ID,
         SUBJECT_ID,
+        TESTS_EXTRA,
         TESTS_OFFLINE,
         TESTS_ONLINE,
         FakeServer,
@@ -745,7 +757,7 @@ def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
     result = results[0]
     assert result.course_id == COURSE_ID
     assert (result.lessons, result.subjects) == (2, 1)
-    total_tests = len(TESTS_ONLINE) + len(TESTS_OFFLINE)  # both modes of the subject
+    total_tests = len(TESTS_ONLINE) + len(TESTS_EXTRA) + len(TESTS_OFFLINE)
     assert result.tests == total_tests
     assert not result.error
     assert [item.subject_id for item in subjects] == [SUBJECT_ID]
@@ -814,3 +826,102 @@ def test_database_upgrades_from_v2_to_course_schema(temp_db):
     assert database.list_courses()[0]["title"] == "Новый курс"
     with sqlite3.connect(path) as check:
         assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+# --------------------------------------------------------------------------- #
+# subject → занятие → домашка grouping
+# --------------------------------------------------------------------------- #
+def test_lesson_meta_parses_date_status_progress_topics():
+    import json as _json
+
+    row = {
+        "title": "Урок 1",
+        "payload_json": _json.dumps({
+            "number": 1,
+            "title": "Урок 1",
+            "date": "2025-09-03T19:40:00",
+            "status": "visited",
+            "progress": {"percent": 100},
+            "timeStart": "19:40",
+            "timeEnd": "21:10",
+            "topics": ["VIII–XV вв. Судьбы Русских земель", "Дополнительные материалы"],
+        }),
+    }
+    meta = models.lesson_meta(row)
+    assert meta.heading == "Занятие 1"
+    assert meta.date_text == "3 сентября"
+    assert meta.status == "Посещено"
+    assert meta.status_kind == "success"
+    assert meta.progress == 100
+    assert meta.time_text == "19:40-21:10"
+    assert meta.topics == (
+        "VIII–XV вв. Судьбы Русских земель", "Дополнительные материалы",
+    )
+
+    viewed = models.lesson_meta(
+        {"title": "Урок", "payload_json": _json.dumps({"status": "viewed", "date": "10.09.2025"})}
+    )
+    assert viewed.status == "Просмотрено"
+    assert viewed.status_kind == "outline"
+    assert viewed.date_text == "10 сентября"
+
+    empty = models.lesson_meta({"title": "Без данных", "payload_json": "{}"})
+    assert empty.status == "" and empty.date_text == "" and empty.topics == ()
+    assert models.format_lesson_date("") == ""
+    assert models.format_lesson_date("не дата") == ""
+
+
+def test_subject_homeworks_groups_by_entity_lesson(temp_db):
+    """Домашки belong to the lesson whose entity id matches their lessonId."""
+    from tests.fake_server import (
+        KBS_EXTRA,
+        KBS_OFFLINE,
+        LESSON2_DB_ID,
+        LESSON2_ENTITY_ID,
+        LESSON_DB_ID,
+        LESSON_ENTITY_ID,
+        SUBJECT_ID,
+    )
+
+    db.upsert_subject(SUBJECT_ID, "Предмет", {})
+    db.upsert_course(111137, "Демо-курс", {})
+    db.replace_course_lessons(111137, [
+        {"id": LESSON_DB_ID, "entity_id": LESSON_ENTITY_ID, "title": "Урок 1",
+         "position": 0, "payload": {"number": 1, "date": "2025-09-03T19:40:00"}},
+        {"id": LESSON2_DB_ID, "entity_id": LESSON2_ENTITY_ID, "title": "Урок 2",
+         "position": 1, "payload": {"number": 2}},
+    ])
+    db.set_lesson_subjects(LESSON_DB_ID, [{"subject_id": SUBJECT_ID, "position": 0}])
+    db.set_lesson_subjects(LESSON2_DB_ID, [{"subject_id": SUBJECT_ID, "position": 0}])
+    for kid, lesson, title in (
+        (KBS_EXTRA - 2, LESSON_ENTITY_ID, "Домашка 1"),
+        (KBS_EXTRA, LESSON_ENTITY_ID, "Домашка 2"),
+        (KBS_OFFLINE, LESSON2_ENTITY_ID, "Домашка 3"),
+    ):
+        db.upsert_kbs(kid, SUBJECT_ID, "online", title, lesson)
+
+    grouped = db.subject_homeworks(SUBJECT_ID)
+    assert [lesson["id"] for lesson, _ in grouped["lessons"]] == [
+        LESSON_DB_ID, LESSON2_DB_ID
+    ]
+    first, second = grouped["lessons"]
+    assert [homework["id"] for homework in first[1]] == [KBS_EXTRA - 2, KBS_EXTRA]
+    assert [homework["id"] for homework in second[1]] == [KBS_OFFLINE]
+    assert grouped["orphans"] == []
+
+    # a homework without a lessonId is shown separately, never lost
+    db.upsert_kbs(999, SUBJECT_ID, "online", "Без занятия", None)
+    grouped = db.subject_homeworks(SUBJECT_ID)
+    assert [homework["id"] for homework in grouped["orphans"]] == [999]
+
+    # the course view groups the same way and keeps the lesson meta
+    course_groups = db.course_homeworks(111137)
+    assert [lesson["id"] for lesson, _ in course_groups["lessons"]] == [
+        LESSON_DB_ID, LESSON2_DB_ID
+    ]
+    meta = models.lesson_meta(course_groups["lessons"][0][0])
+    assert meta.heading == "Занятие 1" and meta.date_text == "3 сентября"
+
+    row = db.homework_row(KBS_EXTRA)
+    assert row["lesson"]["id"] == LESSON_DB_ID
+    assert db.lesson_homeworks(LESSON_DB_ID)[0]["id"] == KBS_EXTRA - 2
