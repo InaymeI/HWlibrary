@@ -18,3 +18,12 @@ cookies.json
 .vscode/
 *.swp
 .DS_Store
+
+# Testing
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated screenshots (docs/ is tracked, ad-hoc ones are not)
+screenshots/
