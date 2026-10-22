@@ -43,7 +43,20 @@ def _draw(name: str, painter: QPainter, color: str) -> None:
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-    if name == "search":
+    if name == "calendar":
+        painter.drawRoundedRect(QRectF(4.2, 5.6, 15.6, 14.2), 2.4, 2.4)
+        line(4.2, 10.0, 19.8, 10.0)
+        line(8.4, 3.6, 8.4, 7.0)
+        line(15.6, 3.6, 15.6, 7.0)
+    elif name == "video":
+        painter.drawRoundedRect(QRectF(3.6, 7.2, 12.2, 9.6), 2.2, 2.2)
+        poly((16.4, 10.6), (20.4, 8.2), (20.4, 15.8), (16.4, 13.4))
+    elif name == "homework":
+        poly((6.0, 4.2), (18.0, 4.2), (18.0, 19.8), (12.0, 16.0), (6.0, 19.8), (6.0, 4.2))
+    elif name == "check-circle":
+        painter.drawEllipse(QPointF(12, 12), 8.2, 8.2)
+        poly((8.2, 12.2), (11.0, 15.0), (15.8, 9.2))
+    elif name == "search":
         painter.drawEllipse(QPointF(10.6, 10.6), 6.1, 6.1)
         line(15.2, 15.2, 20.0, 20.0)
     elif name == "refresh":

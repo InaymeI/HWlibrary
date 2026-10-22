@@ -19,19 +19,27 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMenu,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import config, db, icons
 from ..answers import answer_preview, build_answer
-from ..models import TestDetails, relative_time, test_details, test_title
+from ..models import (
+    TestDetails,
+    lesson_meta,
+    relative_time,
+    test_details,
+    test_title,
+)
 from ..theme import Palette
 from ..widgets import (
     AutoHeightTextBrowser,
@@ -347,7 +355,7 @@ class DashboardPage(ScrollPage):
     def _build_recent(self, stats: dict[str, int]) -> None:
         courses = db.list_courses()
         if courses:
-            self.body.addWidget(SectionTitle("Курсы", len(courses)))
+            self.body.addWidget(SectionTitle("Предметы", len(courses)))
             for course in courses[:4]:
                 row = ListRow(
                     course["title"] or f"Курс #{course['id']}",
@@ -370,12 +378,12 @@ class DashboardPage(ScrollPage):
                 self.body.addWidget(row)
             if len(courses) > 4:
                 more_courses = ghost_button(
-                    f"Ещё {len(courses) - 4} — открыть курсы", "layers"
+                    f"Ещё {len(courses) - 4} — открыть предметы", "layers"
                 )
                 more_courses.clicked.connect(lambda: self.navigate.emit("courses"))
                 self.body.addWidget(more_courses, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.body.addWidget(SectionTitle("Предметы", stats["subjects"]))
+        self.body.addWidget(SectionTitle("Отдельные предметы", stats["subjects"]))
         subjects = sorted(
             db.list_subjects(),
             key=lambda row: row.get("fetched_at") or 0,
@@ -412,7 +420,11 @@ def _nested(widget: QWidget, indent: int = 30) -> QWidget:
 
 
 class CoursesPage(ScrollPage):
-    """All courses added from ``/student/courses/<id>/lessons`` links."""
+    """All subjects added from ``/student/courses/<id>/lessons`` links.
+
+    A "subject" here is the top level of the site: the page whose first link
+    lists занятия; the practice blocks inside it are only a storage detail.
+    """
 
     def __init__(self, main) -> None:
         super().__init__(main)
@@ -425,9 +437,9 @@ class CoursesPage(ScrollPage):
     def refresh(self) -> None:
         clear_layout(self.body)
         self.header.set_content(
-            "Курсы",
-            "Уроки, практики и задания, загруженные из ссылки на курс.",
-            breadcrumb=[("Библиотека", "dash"), ("Курсы", None)],
+            "Предметы",
+            "Занятия и домашки, загруженные из ссылки на предмет.",
+            breadcrumb=[("Библиотека", "dash"), ("Предметы", None)],
         )
         add_button = primary_button("Добавить из ссылки", "plus")
         add_button.clicked.connect(self.main.add_link_dialog)
@@ -438,34 +450,34 @@ class CoursesPage(ScrollPage):
 
         courses = db.list_courses()
         if not courses:
-            empty_add = primary_button("Добавить курс", "plus")
+            empty_add = primary_button("Добавить предмет", "plus")
             empty_add.clicked.connect(self.main.add_link_dialog)
             self.body.addWidget(EmptyState(
                 "book",
-                "Курсы ещё не добавлены",
-                "Скопируйте адрес страницы курса, например "
+                "Предметы ещё не добавлены",
+                "Скопируйте адрес страницы предмета, например "
                 "https://education.maximumtest.ru/student/courses/111137/lessons, "
-                "и вставьте его в поле «Добавить из ссылки». Приложение загрузит уроки, "
-                "практики и все задания.",
+                "и вставьте его в поле «Добавить из ссылки». Приложение загрузит "
+                "занятия, домашки и все задания.",
                 [empty_add],
             ))
             self.body.addStretch(1)
             return
 
-        self.body.addWidget(SectionTitle("Курсы", len(courses)))
+        self.body.addWidget(SectionTitle("Предметы", len(courses)))
         for course in courses:
             lessons = course.get("lesson_count") or 0
-            subjects = course.get("subject_count") or 0
+            homeworks = course.get("homework_count") or 0
             total = course.get("total") or 0
             supported = course.get("supported") or 0
             subtitle = " · ".join((
                 f"ID {course['id']}",
-                f"{fmt_int(lessons)} {plural(lessons, 'урок', 'урока', 'уроков')}",
-                f"{fmt_int(subjects)} {plural(subjects, 'предмет', 'предмета', 'предметов')}",
+                f"{fmt_int(lessons)} {plural(lessons, 'занятие', 'занятия', 'занятий')}",
+                f"{fmt_int(homeworks)} {plural(homeworks, 'домашка', 'домашки', 'домашек')}",
                 f"обновлено {relative_time(course.get('fetched_at'))}",
             ))
             row = ListRow(
-                course["title"] or f"Курс #{course['id']}",
+                course["title"] or f"Предмет #{course['id']}",
                 subtitle,
                 badges=[
                     (f"{fmt_int(total)} {plural(total, 'тест', 'теста', 'тестов')}", "muted"),
@@ -481,8 +493,159 @@ class CoursesPage(ScrollPage):
         self.body.addStretch(1)
 
 
+def homework_row_widget(homework: dict[str, Any], navigate, *, icon: str = "homework") -> ListRow:
+    """One homework (knowledge base) row, used on subject/lesson/course pages."""
+    total = int(homework.get("total") or 0)
+    supported = int(homework.get("supported") or 0)
+    bits = [f"Домашка #{homework['id']}"]
+    if homework.get("mode"):
+        bits.append(config.mode_label(homework["mode"]))
+    if total:
+        bits.append(f"{fmt_int(total)} {plural(total, 'тест', 'теста', 'тестов')}")
+    row = ListRow(
+        homework.get("title") or f"Домашка #{homework['id']}",
+        " · ".join(bits),
+        badges=(
+            [(f"{fmt_int(supported)} с ответом", "success" if supported else "muted")]
+            if supported else []
+        ),
+        trailing=f"{supported}/{total}" if total else "",
+        icon_name=icon,
+    )
+    row.clicked.connect(
+        lambda _checked=False, kid=int(homework["id"]): navigate(f"homework:{kid}")
+    )
+    return row
+
+
+class LessonCard(QFrame):
+    """«Занятие N · 3 сентября» with homework inside, like the site."""
+
+    def __init__(
+        self,
+        lesson: dict[str, Any],
+        homeworks: list[dict[str, Any]],
+        index: int,
+        palette: Palette,
+        navigate,
+        expanded: bool = True,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("card")
+        self.navigate = navigate
+        self.lesson = lesson
+        self._expanded = expanded
+        self._palette = palette
+        meta = lesson_meta(lesson)
+        self.meta = meta
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 18)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        left = QVBoxLayout()
+        left.setSpacing(4)
+
+        if meta.date_text:
+            date_row = QHBoxLayout()
+            date_row.setSpacing(6)
+            calendar = QLabel()
+            calendar.setPixmap(icons.pixmap("calendar", palette.muted, 14))
+            date_row.addWidget(calendar)
+            date_row.addWidget(label(meta.date_text, "muted"))
+            date_row.addStretch(1)
+            left.addLayout(date_row)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        heading = meta.heading if meta.number is not None else (lesson.get("title") or "Занятие")
+        title_row.addWidget(label(heading, "h2"))
+        if meta.status:
+            title_row.addWidget(Badge(meta.status, meta.status_kind or "success"))
+        title_row.addStretch(1)
+        left.addLayout(title_row)
+        top.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        if meta.online:
+            online = QHBoxLayout()
+            online.setSpacing(5)
+            online_icon = QLabel()
+            online_icon.setPixmap(icons.pixmap("video", palette.muted, 13))
+            online.addWidget(online_icon)
+            online.addWidget(label("Онлайн", "muted"))
+            right.addLayout(online)
+        if meta.time_text:
+            time_label = label(meta.time_text, "muted")
+            time_label.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            right.addWidget(time_label)
+        self.chevron = QToolButton()
+        self.chevron.setAutoRaise(True)
+        self.chevron.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chevron.setToolTip("Свернуть занятие" if expanded else "Показать домашки")
+        self.chevron.clicked.connect(self.toggle)
+        right.addWidget(self.chevron, 0, Qt.AlignmentFlag.AlignRight)
+        top.addLayout(right)
+        layout.addLayout(top)
+
+        if meta.progress is not None:
+            progress_row = QHBoxLayout()
+            progress_row.setSpacing(8)
+            progress_row.addWidget(label("Прогресс по ДЗ", "muted"))
+            progress_row.addStretch(1)
+            progress_row.addWidget(label(f"{meta.progress}%", "muted"))
+            layout.addLayout(progress_row)
+
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(int(meta.progress))
+            bar.setTextVisible(False)
+            bar.setFixedHeight(7)
+            fill = "#4caf50" if palette.name == "light" else "#4ed3a0"
+            bar.setStyleSheet(
+                "QProgressBar { background: " + palette.surface_alt + ";"
+                " border: none; border-radius: 4px; }"
+                "QProgressBar::chunk { background: " + fill + ";"
+                " border-radius: 4px; }"
+            )
+            layout.addWidget(bar)
+
+        if meta.topics:
+            quoted = ", ".join(f"«{topic}»" for topic in meta.topics)
+            layout.addWidget(label(f"Темы занятия: {quoted}", "muted", wrap=True))
+
+        self.homework_box = QWidget()
+        homework_layout = QVBoxLayout(self.homework_box)
+        homework_layout.setContentsMargins(0, 4, 0, 0)
+        homework_layout.setSpacing(6)
+        if homeworks:
+            for homework in homeworks:
+                homework_layout.addWidget(homework_row_widget(homework, navigate))
+        else:
+            homework_layout.addWidget(label(
+                "Домашек пока нет — синхронизируйте курс", "muted"
+            ))
+        layout.addWidget(self.homework_box)
+        self._apply_chevron()
+        self.homework_box.setVisible(expanded)
+
+    def _apply_chevron(self) -> None:
+        name = "chevron-down" if self._expanded else "chevron-right"
+        self.chevron.setIcon(icons.icon(name, self._palette.text_secondary, 16))
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        self.homework_box.setVisible(self._expanded)
+        self._apply_chevron()
+
+
 class CoursePage(ScrollPage):
-    """Course → lessons → practice blocks (subjects)."""
+    """Предмет/курс: lessons («Занятие N») with the homework inside."""
 
     def __init__(self, main) -> None:
         super().__init__(main)
@@ -503,36 +666,35 @@ class CoursePage(ScrollPage):
         clear_layout(self.body)
         if not course:
             self.header.set_content(
-                "Курс не найден", "", [("Библиотека", "dash"), ("Курсы", "courses")]
+                "Предмет не найден", "", [("Библиотека", "dash"), ("Предметы", "courses")]
             )
-            add_button = primary_button("Добавить курс", "plus")
+            add_button = primary_button("Добавить из ссылки", "plus")
             add_button.clicked.connect(self.main.add_link_dialog)
             self.body.addWidget(EmptyState(
-                "alert", "Курс удалён из кэша",
-                "Добавьте ссылку на курс снова, чтобы загрузить его уроки.",
+                "alert", "Предмет удалён из кэша",
+                "Добавьте ссылку на курс снова, чтобы загрузить занятия и домашки.",
                 [add_button],
             ))
             self.body.addStretch(1)
             return
 
         stats = db.course_stats(self.course_id)
-        lessons = db.course_lessons(self.course_id)
-        title = course["title"] or f"Курс #{self.course_id}"
-        sync_button = primary_button("Синхронизировать курс", "refresh")
+        groups = db.course_homeworks(self.course_id)
+        title = course["title"] or f"Предмет #{self.course_id}"
+        sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_course(self.course_id))
-        delete_button = ghost_button("Удалить курс из кэша", "trash", color_key="danger")
+        delete_button = ghost_button("Удалить из кэша", "trash", color_key="danger")
         delete_button.clicked.connect(lambda: self.main.delete_course(self.course_id))
         self.header.set_content(
             title,
             " · ".join((
                 f"ID {self.course_id}",
-                f"{fmt_int(stats['lessons'])} {plural(stats['lessons'], 'урок', 'урока', 'уроков')}",
-                f"{fmt_int(stats['subjects'])} "
-                f"{plural(stats['subjects'], 'предмет', 'предмета', 'предметов')}",
+                f"{fmt_int(stats['lessons'])} "
+                f"{plural(stats['lessons'], 'занятие', 'занятия', 'занятий')}",
                 f"{fmt_int(stats['total'])} {plural(stats['total'], 'тест', 'теста', 'тестов')}",
                 f"обновлено {relative_time(course.get('fetched_at'))}",
             )),
-            breadcrumb=[("Библиотека", "dash"), ("Курсы", "courses"), (title, None)],
+            breadcrumb=[("Библиотека", "dash"), ("Предметы", "courses"), (title, None)],
             badges=[
                 (f"{fmt_int(stats['supported'])} с ответом",
                  "success" if stats["supported"] else "muted"),
@@ -540,61 +702,37 @@ class CoursePage(ScrollPage):
             actions=[sync_button, delete_button],
         )
 
-        if not lessons:
-            load_button = primary_button("Загрузить уроки", "refresh")
+        if not groups["lessons"]:
+            load_button = primary_button("Загрузить занятия", "refresh")
             load_button.clicked.connect(lambda: self.main.sync_course(self.course_id))
             self.body.addWidget(EmptyState(
                 "layers",
-                "Уроки ещё не загружены",
-                "Синхронизируйте курс: приложение прочитает его структуру и скачает задания.",
+                "Занятия ещё не загружены",
+                "Синхронизируйте предмет: приложение прочитает структуру курса, "
+                "занятия и скачает все домашки.",
                 [load_button],
             ))
             self.body.addStretch(1)
             return
 
-        self.body.addWidget(SectionTitle("Уроки", len(lessons)))
-        for position, (lesson, subjects) in enumerate(lessons, start=1):
-            subject_tests = sum(subject["total"] for subject in subjects)
-            lesson_title = lesson["title"] or f"Урок #{lesson['id']}"
-            row = ListRow(
-                f"{position}. {lesson_title}",
-                " · ".join((
-                    lesson.get("entity_lesson_id")
-                    and f"lessonId {lesson['entity_lesson_id']}" or f"урок #{lesson['id']}",
-                    f"{len(subjects)} {plural(len(subjects), 'предмет', 'предмета', 'предметов')}",
-                    f"{fmt_int(subject_tests)} {plural(subject_tests, 'тест', 'теста', 'тестов')}",
-                )),
-                badges=[] if subjects else [("только теория", "muted")],
-                trailing=f"{len(subjects)}" if subjects else "",
-                icon_name="layers",
-            )
-            row.clicked.connect(
-                lambda _checked=False, lid=lesson["id"]: self.navigate.emit(f"lesson:{lid}")
-            )
-            self.body.addWidget(row)
-            for subject in subjects:
-                subject_row = ListRow(
-                    subject["title"] or f"Предмет #{subject['id']}",
-                    f"предмет #{subject['id']}",
-                    badges=[
-                        (f"{fmt_int(subject['total'])} "
-                         f"{plural(subject['total'], 'тест', 'теста', 'тестов')}",
-                         "muted" if subject["total"] else "warning"),
-                        (f"{fmt_int(subject['supported'])} с ответом",
-                         "success" if subject["supported"] else "muted"),
-                    ],
-                    trailing=f"{subject['supported']}/{subject['total']}",
-                    icon_name="grid",
-                )
-                subject_row.clicked.connect(
-                    lambda _checked=False, sid=subject["id"]: self.navigate.emit(f"subject:{sid}")
-                )
-                self.body.addWidget(_nested(subject_row))
+        self.body.addWidget(SectionTitle("Занятия", len(groups["lessons"])))
+        for index, (lesson, homeworks) in enumerate(groups["lessons"], start=1):
+            self.body.addWidget(LessonCard(
+                lesson, homeworks, index, self.main.theme_palette(), self.navigate.emit
+            ))
+        self._add_orphans(groups["orphans"])
         self.body.addStretch(1)
+
+    def _add_orphans(self, orphans: list[dict[str, Any]]) -> None:
+        if not orphans:
+            return
+        self.body.addWidget(SectionTitle("Домашки без занятия", len(orphans)))
+        for homework in orphans:
+            self.body.addWidget(homework_row_widget(homework, self.navigate.emit))
 
 
 class LessonPage(ScrollPage):
-    """One lesson and its practice blocks."""
+    """One lesson and its homework."""
 
     def __init__(self, main) -> None:
         super().__init__(main)
@@ -615,74 +753,362 @@ class LessonPage(ScrollPage):
         clear_layout(self.body)
         if not lesson:
             self.header.set_content(
-                "Урок не найден", "", [("Библиотека", "dash"), ("Курсы", "courses")]
+                "Занятие не найдено", "", [("Библиотека", "dash"), ("Предметы", "courses")]
             )
             self.body.addWidget(EmptyState(
-                "alert", "Урок отсутствует в кэше",
-                "Синхронизируйте курс, чтобы построить структуру уроков.",
+                "alert", "Занятие отсутствует в кэше",
+                "Синхронизируйте предмет, чтобы построить структуру занятий.",
             ))
             self.body.addStretch(1)
             return
 
         course = db.get_course(lesson["course_id"]) or {}
-        subjects = db.lesson_subjects(self.lesson_id)
-        title = lesson["title"] or f"Урок #{self.lesson_id}"
-        sync_button = primary_button("Синхронизировать урок", "refresh")
+        meta = lesson_meta(lesson)
+        homeworks = db.lesson_homeworks(self.lesson_id)
+        title = meta.heading if meta.number is not None else (
+            lesson["title"] or f"Занятие #{self.lesson_id}"
+        )
+        sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_lesson(self.lesson_id))
-        open_course = secondary_button("К курсу", "book")
+        open_course = secondary_button("К предмету", "book")
         open_course.clicked.connect(
             lambda: self.navigate.emit(f"course:{lesson['course_id']}")
         )
+        bits = [f"lessonId {lesson['entity_lesson_id']}"] if lesson.get("entity_lesson_id") else []
+        if meta.date_text:
+            bits.append(meta.date_text)
+        if homeworks:
+            bits.append(
+                f"{fmt_int(len(homeworks))} "
+                f"{plural(len(homeworks), 'домашка', 'домашки', 'домашек')}"
+            )
         self.header.set_content(
             title,
-            " · ".join(bit for bit in (
-                f"урок #{self.lesson_id}",
-                lesson.get("entity_lesson_id") and f"lessonId {lesson['entity_lesson_id']}",
-                f"{len(subjects)} {plural(len(subjects), 'предмет', 'предмета', 'предметов')}",
-            ) if bit),
+            " · ".join(bits),
             breadcrumb=[
                 ("Библиотека", "dash"),
-                ("Курсы", "courses"),
-                (course.get("title") or f"Курс #{lesson['course_id']}",
+                ("Предметы", "courses"),
+                (course.get("title") or f"Предмет #{lesson['course_id']}",
                  f"course:{lesson['course_id']}"),
                 (title, None),
             ],
             actions=[sync_button, open_course],
         )
 
-        if not subjects:
+        if meta.topics:
+            card = QFrame()
+            card.setObjectName("cardFlat")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 12, 16, 12)
+            card_layout.addWidget(label(
+                "Темы занятия: " + ", ".join(f"«{topic}»" for topic in meta.topics),
+                "", wrap=True,
+            ))
+            self.body.addWidget(card)
+
+        if not homeworks:
             self.body.addWidget(EmptyState(
                 "layers",
-                "В уроке нет практик",
-                "Этот урок содержит только теорию — заданий для загрузки нет.",
-                [secondary_button("Открыть курс", "book")],
+                "В занятии нет домашек",
+                "Это занятие содержит только теорию — заданий для загрузки нет.",
+                [secondary_button("Открыть предмет", "book")],
             ))
             self.body.addStretch(1)
             return
 
-        self.body.addWidget(SectionTitle("Практики", len(subjects)))
-        for subject in subjects:
-            row = ListRow(
-                subject["title"] or f"Предмет #{subject['id']}",
-                f"предмет #{subject['id']}",
-                badges=[
-                    (f"{fmt_int(subject['total'])} "
-                     f"{plural(subject['total'], 'тест', 'теста', 'тестов')}",
-                     "muted" if subject["total"] else "warning"),
-                    (f"{fmt_int(subject['supported'])} с ответом",
-                     "success" if subject["supported"] else "muted"),
-                ],
-                trailing=f"{subject['supported']}/{subject['total']}",
-                icon_name="grid",
-            )
-            row.clicked.connect(
-                lambda _checked=False, sid=subject["id"]: self.navigate.emit(f"subject:{sid}")
-            )
-            self.body.addWidget(row)
+        self.body.addWidget(SectionTitle("Домашки", len(homeworks)))
+        for homework in homeworks:
+            self.body.addWidget(homework_row_widget(homework, self.navigate.emit))
         self.body.addStretch(1)
 
 
+class HomeworkPage(ScrollPage):
+    """Homework player: numbered tests on top, the current question below."""
+
+    def __init__(self, main) -> None:
+        super().__init__(main)
+        self.navigate.connect(main.navigate)
+        self.kbs_id: int | None = None
+        self.index = 0
+        self._tests: list[dict[str, Any]] = []
+        self._chips: list[QPushButton] = []
+        self._palette = main.theme_palette()
+
+    # ------------------------------------------------------------------ #
+    def show_homework(self, kbs_id: int, index: int = 0) -> None:
+        self.kbs_id = kbs_id
+        self.index = max(0, int(index))
+        self.refresh()
+
+    def apply_theme(self, palette: Palette) -> None:
+        self._palette = palette
+        self.refresh()
+
+    # ------------------------------------------------------------------ #
+    def refresh(self) -> None:
+        if self.kbs_id is None:
+            return
+        homeworks = db.homework_row(self.kbs_id)
+        clear_layout(self.body)
+        self._chips = []
+        if not homeworks:
+            self.header.set_content(
+                "Домашка не найдена", "", [("Библиотека", "dash"), ("Предметы", "courses")]
+            )
+            self.body.addWidget(EmptyState("alert", "Домашка отсутствует в кэше", ""))
+            self.body.addStretch(1)
+            return
+
+        self._tests = db.homework_tests(self.kbs_id)
+        if self._tests:
+            self.index = min(self.index, len(self._tests) - 1)
+        subject = db.get_subject(homeworks["subject_id"]) or {}
+        lesson = homeworks.get("lesson") or {}
+        meta = lesson_meta(lesson) if lesson else None
+        total = int(homeworks.get("total") or 0)
+        supported = int(homeworks.get("supported") or 0)
+
+        sync_button = primary_button("Синхронизировать", "refresh")
+        sync_button.clicked.connect(lambda: self.main.sync_subject(homeworks["subject_id"]))
+        table_button = secondary_button("Списком", "grid")
+        table_button.clicked.connect(lambda: self.navigate.emit(f"kbs:{self.kbs_id}"))
+
+        breadcrumb: list[tuple[str, str | None]] = [("Библиотека", "dash")]
+        if lesson:
+            breadcrumb.append(
+                (subject.get("title") or f"Предмет #{homeworks['subject_id']}",
+                 f"course:{lesson.get('course_id')}")
+            )
+            breadcrumb.append(
+                (meta.heading if meta and meta.number is not None
+                 else lesson.get("title") or "Занятие",
+                 f"lesson:{lesson['id']}")
+            )
+        elif subject:
+            breadcrumb.append(
+                (subject.get("title") or f"Предмет #{homeworks['subject_id']}",
+                 f"subject:{homeworks['subject_id']}")
+            )
+        breadcrumb.append((homeworks.get("title") or f"Домашка #{self.kbs_id}", None))
+
+        self.header.set_content(
+            homeworks.get("title") or f"Домашка #{self.kbs_id}",
+            " · ".join(bit for bit in (
+                f"домашка #{self.kbs_id}",
+                config.mode_label(homeworks.get("mode")),
+                f"{fmt_int(total)} {plural(total, 'тест', 'теста', 'тестов')}",
+                meta.date_text if meta else "",
+            ) if bit),
+            breadcrumb=breadcrumb,
+            badges=[(f"{fmt_int(supported)} с ответом", "success" if supported else "muted")],
+            actions=[sync_button, table_button],
+        )
+
+        if not self._tests:
+            load_button = primary_button("Загрузить задания", "refresh")
+            load_button.clicked.connect(lambda: self.main.sync_subject(homeworks["subject_id"]))
+            self.body.addWidget(EmptyState(
+                "layers",
+                "В домашке пока нет заданий",
+                "Синхронизируйте предмет, чтобы скачать тесты.",
+                [load_button],
+            ))
+            self.body.addStretch(1)
+            return
+
+        # numbered chips, like the task switcher on the site
+        chips_card = QFrame()
+        chips_card.setObjectName("card")
+        chips_layout = QVBoxLayout(chips_card)
+        chips_layout.setContentsMargins(18, 14, 18, 14)
+        chips_layout.setSpacing(8)
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(6)
+        for position, test in enumerate(self._tests):
+            chip = QPushButton(str(position + 1))
+            chip.setFixedSize(36, 32)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setToolTip(test_title(test))
+            chip.clicked.connect(
+                lambda _checked=False, pos=position: self.open_test_at(pos)
+            )
+            self._chips.append(chip)
+            chips_row.addWidget(chip)
+        chips_row.addStretch(1)
+        chips_layout.addLayout(chips_row)
+        chips_layout.addWidget(label(
+            f"Задание {self.index + 1} из {len(self._tests)}", "muted"
+        ))
+        self.body.addWidget(chips_card)
+        self._style_chips()
+
+        row = self._tests[self.index]
+        details = test_details(row)
+        self._build_question(details)
+        self._build_options(details)
+        self._build_nav()
+
+        if self._tests:
+            self.body.addStretch(1)
+        self._install_shortcuts()
+
+    # ------------------------------------------------------------------ #
+    def _style_chips(self) -> None:
+        palette = self._palette
+        for position, chip in enumerate(self._chips):
+            row = self._tests[position]
+            try:
+                details = test_details(row)
+                answered = details.has_right_answers
+            except Exception:  # noqa: BLE001 - styling must never break the page
+                answered = False
+            current = position == self.index
+            if current:
+                background, color, border = palette.surface, palette.accent, palette.accent
+            elif answered:
+                background, color, border = palette.success_soft, palette.success, "transparent"
+            else:
+                background, color, border = palette.surface_alt, palette.text_secondary, "transparent"
+            chip.setStyleSheet(
+                f"QPushButton {{ background: {background}; color: {color};"
+                f" border: 2px solid {border}; border-radius: 8px;"
+                f" font-weight: {'700' if current else '600'}; }}"
+                "QPushButton:hover { border-color: " + palette.accent + "; }"
+            )
+
+    def chip_count(self) -> int:
+        return len(self._chips)
+
+    def open_test_at(self, position: int) -> None:
+        if 0 <= position < len(self._tests):
+            self.index = position
+            self.refresh()
+
+    def go_previous(self) -> None:
+        if self.index > 0:
+            self.open_test_at(self.index - 1)
+
+    def go_next(self) -> None:
+        if self.index < len(self._tests) - 1:
+            self.open_test_at(self.index + 1)
+
+    def open_current_test(self) -> None:
+        if self._tests:
+            self.navigate.emit(f"test:{self._tests[self.index]['id']}")
+
+    def _install_shortcuts(self) -> None:
+        for key, slot in (
+            (Qt.Key.Key_Left, self.go_previous),
+            (Qt.Key.Key_Right, self.go_next),
+            (Qt.Key.Key_Return, self.open_current_test),
+        ):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
+
+    # ------------------------------------------------------------------ #
+    def _build_question(self, details: TestDetails) -> None:
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 16, 20, 18)
+        layout.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(Badge(
+            TYPE_NAMES.get(details.type, details.type or "тип неизвестен"), "accent"
+        ))
+        head.addWidget(label(details.title, "muted"))
+        head.addStretch(1)
+        head.addWidget(label(f"#{details.id}", "muted"))
+        layout.addLayout(head)
+
+        browser = AutoHeightTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.document().setDefaultStyleSheet(
+            f"body {{ color: {self._palette.text}; font-size: 15px; line-height: 150%; }}"
+            f"p {{ margin: 6px 0; }} a {{ color: {self._palette.accent}; }}"
+            "img { max-width: 100%; }"
+        )
+        browser.setHtml(details.question_html or "<p><i>Условие не сохранено в кэше.</i></p>")
+        layout.addWidget(browser)
+        QTimer.singleShot(0, browser.fit_to_content)
+        self.body.addWidget(card)
+
+    def _build_options(self, details: TestDetails) -> None:
+        if not details.options:
+            return
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 14, 20, 18)
+        layout.setSpacing(6)
+        letters = "АБВГДЕЖЗИКЛМНОПРСТУФ"
+        palette = self._palette
+        for position, option in enumerate(details.options):
+            row = QFrame()
+            row.setObjectName("cardFlat")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(12, 10, 12, 10)
+            row_layout.setSpacing(12)
+
+            mark = QLabel()
+            mark.setFixedSize(18, 18)
+            mark.setStyleSheet(
+                f"border-radius: 9px; border: 2px solid "
+                f"{palette.success if option.is_right else palette.border_strong};"
+                f" background: {palette.success_soft if option.is_right else 'transparent'};"
+            )
+            row_layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignVCenter)
+            prefix = letters[position] if position < len(letters) else f"{position + 1}."
+            text = label(
+                f"{prefix}. {option.display}",
+                "" if option.is_right else "muted",
+                wrap=True,
+            )
+            row_layout.addWidget(text, 1)
+            if option.is_right:
+                row_layout.addWidget(Badge("верно", "success"))
+            layout.addWidget(row)
+        self.body.addWidget(card)
+
+    def _build_nav(self) -> None:
+        card = QFrame()
+        card.setObjectName("cardFlat")
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        previous = secondary_button("Назад", "chevron-left")
+        previous.clicked.connect(self.go_previous)
+        previous.setEnabled(self.index > 0)
+        layout.addWidget(previous)
+        following = secondary_button("Далее", "chevron-right")
+        following.clicked.connect(self.go_next)
+        following.setEnabled(self.index < len(self._tests) - 1)
+        layout.addWidget(following)
+        layout.addStretch(1)
+
+        copy_button = ghost_button("Копировать ответ", "copy", color_key="muted")
+        copy_button.clicked.connect(self._copy_answer)
+        layout.addWidget(copy_button)
+        open_button = primary_button("Открыть задание", "external")
+        open_button.clicked.connect(self.open_current_test)
+        layout.addWidget(open_button)
+        self.body.addWidget(card)
+
+    def _copy_answer(self) -> None:
+        if not self._tests:
+            return
+        details = test_details(self._tests[self.index])
+        answer = build_answer(details)
+        self.main.copy_text(json.dumps(answer, ensure_ascii=False), "Ответ скопирован")
+
+
 class SubjectPage(ScrollPage):
+    """A subject on its own: its lessons, or a plain list of homeworks."""
+
     def __init__(self, main) -> None:
         super().__init__(main)
         self.navigate.connect(main.navigate)
@@ -692,34 +1118,29 @@ class SubjectPage(ScrollPage):
         self.subject_id = subject_id
         self.refresh()
 
+    def apply_theme(self, palette: Palette) -> None:
+        self.refresh()
+
     def refresh(self) -> None:
         if self.subject_id is None:
             return
         subject = db.get_subject(self.subject_id)
         clear_layout(self.body)
         if not subject:
-            self.header.set_content("Предмет не найден", "", [("Библиотека", "dash")])
+            self.header.set_content(
+                "Предмет не найден", "", [("Библиотека", "dash"), ("Предметы", "courses")]
+            )
             self.body.addWidget(EmptyState(
-                "alert", "Предмет удалён из кэша",
+                "alert",
+                "Предмет удалён из кэша",
                 "Вернитесь на главную и добавьте его снова.",
                 [secondary_button("На главную", "arrow-left")],
             ))
             return
+
         counts = db.subject_stats(self.subject_id)
+        groups = db.subject_homeworks(self.subject_id)
         title = subject["title"] or f"Предмет #{self.subject_id}"
-        path = db.subject_course_path(self.subject_id)
-        breadcrumb: list[tuple[str, str | None]] = [("Библиотека", "dash")]
-        if path:
-            breadcrumb.append(("Курсы", "courses"))
-            breadcrumb.append(
-                (path.get("course_title") or f"Курс #{path['course_id']}",
-                 f"course:{path['course_id']}")
-            )
-            breadcrumb.append(
-                (path.get("lesson_title") or f"Урок #{path['lesson_id']}",
-                 f"lesson:{path['lesson_id']}")
-            )
-        breadcrumb.append((title, None))
 
         sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_subject(self.subject_id))
@@ -730,48 +1151,41 @@ class SubjectPage(ScrollPage):
 
         self.header.set_content(
             title,
-            f"ID {self.subject_id} · "
-            f"{fmt_int(counts['kbs'])} {plural(counts['kbs'], 'раздел', 'раздела', 'разделов')} · "
-            f"{fmt_int(counts['total'])} {plural(counts['total'], 'тест', 'теста', 'тестов')} · "
-            f"обновлено {relative_time(subject.get('fetched_at'))}",
-            breadcrumb=breadcrumb,
+            " · ".join((
+                f"ID {self.subject_id}",
+                f"{fmt_int(len(groups['lessons']))} "
+                f"{plural(len(groups['lessons']), 'занятие', 'занятия', 'занятий')}",
+                f"{fmt_int(counts['total'])} "
+                f"{plural(counts['total'], 'тест', 'теста', 'тестов')}",
+                f"обновлено {relative_time(subject.get('fetched_at'))}",
+            )),
+            breadcrumb=[("Библиотека", "dash"), ("Предметы", "courses"), (title, None)],
             badges=[
-                (f"{fmt_int(counts['supported'])} с ответом", "success" if counts["supported"] else "muted"),
+                (f"{fmt_int(counts['supported'])} с ответом",
+                 "success" if counts["supported"] else "muted"),
             ],
             actions=[sync_button, export_button, delete_button],
         )
 
-        kbs_rows = db.tree_data()
-        entries = next((items for subject, items in kbs_rows if subject["id"] == self.subject_id), [])
-        if not entries:
-            button = primary_button("Загрузить разделы", "refresh")
-            button.clicked.connect(lambda: self.main.sync_subject(self.subject_id))
+        if groups["lessons"]:
+            self.body.addWidget(SectionTitle("Занятия", len(groups["lessons"])))
+            for index, (lesson, homeworks) in enumerate(groups["lessons"], start=1):
+                self.body.addWidget(LessonCard(
+                    lesson, homeworks, index, self.main.theme_palette(), self.navigate.emit
+                ))
+        if groups["orphans"]:
+            self.body.addWidget(SectionTitle("Домашки", len(groups["orphans"])))
+            for homework in groups["orphans"]:
+                self.body.addWidget(homework_row_widget(homework, self.navigate.emit))
+        if not groups["lessons"] and not groups["orphans"]:
+            load_button = primary_button("Загрузить домашки", "refresh")
+            load_button.clicked.connect(lambda: self.main.sync_subject(self.subject_id))
             self.body.addWidget(EmptyState(
                 "layers",
-                "Разделы ещё не загружены",
-                "Синхронизируйте предмет, чтобы получить список разделов и заданий.",
-                [button],
+                "Домашек ещё нет",
+                "Синхронизируйте предмет, чтобы получить разделы и задания.",
+                [load_button],
             ))
-            return
-
-        self.body.addWidget(SectionTitle("Разделы", len(entries)))
-        for kbs, kbs_counts in entries:
-            mode = config.mode_label(kbs.get("mode"))
-            subtitle_bits = [f"Раздел #{kbs['id']}", f"режим: {mode}"]
-            if kbs.get("lesson_id"):
-                subtitle_bits.append(f"lesson {kbs['lesson_id']}")
-            row = ListRow(
-                kbs.get("title") or f"Раздел #{kbs['id']}",
-                " · ".join(subtitle_bits),
-                badges=[
-                    (f"{fmt_int(kbs_counts['total'])} {plural(kbs_counts['total'], 'тест', 'теста', 'тестов')}", "muted"),
-                    (f"{fmt_int(kbs_counts['supported'])} с ответом", "success" if kbs_counts["supported"] else "muted"),
-                ],
-                trailing=f"{kbs_counts['supported']}/{kbs_counts['total']}",
-                icon_name="layers",
-            )
-            row.clicked.connect(lambda kid=kbs["id"]: self.navigate.emit(f"kbs:{kid}"))
-            self.body.addWidget(row)
         self.body.addStretch(1)
 
 

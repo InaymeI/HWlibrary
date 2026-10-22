@@ -384,6 +384,11 @@ QLabel[role="badge"][variant="danger"] {
     color: $danger;
     border-color: transparent;
 }
+QLabel[role="badge"][variant="outline"] {
+    background: transparent;
+    color: $success;
+    border: 1px solid $success;
+}
 
 /* ---------------- misc ---------------- */
 QSplitter::handle { background: transparent; }

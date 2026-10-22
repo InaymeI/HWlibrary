@@ -461,6 +461,7 @@ class LessonEntry:
     entity_id: int | None
     title: str
     position: int
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def subtitle(self) -> str:
@@ -474,6 +475,7 @@ class LessonEntry:
             "entity_id": self.entity_id,
             "title": self.title,
             "position": self.position,
+            "payload": self.raw,
         }
 
 
@@ -551,6 +553,7 @@ def extract_lessons(payload: Any) -> list[LessonEntry]:
                 entity_id=entity_id,
                 title=title or f"Урок #{entity_id or lesson_id}",
                 position=index if position is None else position,
+                raw=item,
             )
         )
     return lessons
@@ -622,6 +625,194 @@ def extract_course_title(payload: Any, fallback: str) -> str:
                 if title:
                     return title
     return fallback
+
+
+# --------------------------------------------------------------------------- #
+# lesson presentation (date, status, progress, topics)
+# --------------------------------------------------------------------------- #
+_RU_MONTHS = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+_DATE_KEY_RE = re.compile(
+    r"(date|day|start|begin|beginat|startsat|starts_at|scheduled|planned)", re.I
+)
+_ISO_DATE_RE = re.compile(
+    r"(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})"
+    r"(?:[T ](?P<h1>\d{2}):(?P<min1>\d{2}))?"
+)
+_DOTTED_DATE_RE = re.compile(r"(?P<d>\d{1,2})\.(?P<m>\d{1,2})\.(?P<y>\d{4})")
+_TIME_RANGE_RE = re.compile(r"(?P<h1>\d{1,2}:\d{2})\s*[-–—]\s*(?P<h2>\d{1,2}:\d{2})")
+
+
+def format_lesson_date(value: Any) -> str:
+    """``"2025-09-03T19:40:00"`` → ``"3 сентября"`` (empty when unknown)."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = _ISO_DATE_RE.search(text)
+    if match:
+        day = int(match.group("d"))
+        month = int(match.group("m"))
+        if 1 <= month <= 12:
+            return f"{day} {_RU_MONTHS[month - 1]}"
+    match = _DOTTED_DATE_RE.search(text)
+    if match:
+        day, month = int(match.group("d")), int(match.group("m"))
+        if 1 <= month <= 12:
+            return f"{day} {_RU_MONTHS[month - 1]}"
+    return ""
+
+
+def _first_string(node: Any, keys: tuple[str, ...], depth: int = 0) -> Any:
+    if not isinstance(node, dict) or depth > 3:
+        return None
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return value
+    for value in node.values():
+        if isinstance(value, dict):
+            found = _first_string(value, keys, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _topics(node: Any) -> tuple[str, ...]:
+    if not isinstance(node, dict):
+        return ()
+    collected: list[str] = []
+    for key in ("topics", "themes", "topicsList", "lessonTopics", "theme", "topic"):
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            collected.append(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, dict):
+                    title = item.get("title") or item.get("name") or item.get("text")
+                    if title:
+                        collected.append(str(title))
+                elif item is not None and str(item).strip():
+                    collected.append(str(item))
+    for container in ("entityInfo", "entity", "lesson"):
+        inner = node.get(container)
+        if isinstance(inner, dict):
+            collected.extend(_topics(inner))
+    return tuple(dict.fromkeys(strip_html(text) for text in collected if strip_html(text)))
+
+
+def _status(node: dict[str, Any]) -> tuple[str, str]:
+    raw = _first_string(
+        node,
+        ("visitStatus", "attendance", "status", "state", "visitState", "visited", "isVisited"),
+    )
+    if raw is None:
+        return "", ""
+    text = str(raw).strip().lower()
+    if text in {"visited", "attended", "present", "true", "1", "yes"}:
+        return "Посещено", "success"
+    if text in {"viewed", "watched", "opened"}:
+        return "Просмотрено", "outline"
+    if text in {"missing", "absent", "false", "0", "no"}:
+        return "Пропущено", "danger"
+    if text in {"planned", "future", "scheduled"}:
+        return "Запланировано", "muted"
+    value = strip_html(raw)
+    return (value, "success") if value else ("", "")
+
+
+def _progress(node: dict[str, Any]) -> int | None:
+    for key in ("progress", "homeworkProgress", "progressPercent", "completedPercent"):
+        value = node.get(key)
+        if isinstance(value, dict):
+            value = value.get("percent") or value.get("value") or value.get("progress")
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= number <= 100:
+            return number
+    return None
+
+
+@dataclass(frozen=True)
+class LessonMeta:
+    """Human facing bits of a lesson: when it was, what it covered."""
+
+    number: int | None
+    title: str
+    date_text: str
+    status: str
+    status_kind: str
+    progress: int | None
+    time_text: str
+    topics: tuple[str, ...]
+
+    @property
+    def heading(self) -> str:
+        if self.number is not None:
+            return f"Занятие {self.number}"
+        return self.title or "Занятие"
+
+    @property
+    def online(self) -> bool:
+        return bool(self.time_text)
+
+
+def lesson_meta(row: dict[str, Any], payload: dict[str, Any] | None = None) -> LessonMeta:
+    """Read date/status/progress/topics out of a cached lesson row."""
+    node = payload if isinstance(payload, dict) and payload else {}
+    if not node:
+        try:
+            node = json.loads(row.get("payload_json") or "{}")
+        except (TypeError, ValueError):
+            node = {}
+    entity = node.get("entityInfo") if isinstance(node.get("entityInfo"), dict) else {}
+
+    date_text = ""
+    for source in (node, entity):
+        for key, value in source.items():
+            if _DATE_KEY_RE.search(str(key)) and isinstance(value, (str, int, float)):
+                date_text = format_lesson_date(value)
+                if date_text:
+                    break
+        if date_text:
+            break
+
+    number = _as_int(
+        node.get("number") or node.get("index") or node.get("lessonNumber") or node.get("position")
+    )
+    topics = _topics(node) or _topics(entity)
+    status, status_kind = _status(node)
+    progress = _progress(node)
+
+    time_text = ""
+    start = node.get("timeStart") or node.get("startTime") or node.get("time_start")
+    end = node.get("timeEnd") or node.get("endTime") or node.get("time_end")
+    if start and end:
+        time_text = f"{start}-{end}"
+    if not time_text:
+        match = _TIME_RANGE_RE.search(str(node.get("time") or node.get("timeRange") or ""))
+        if match:
+            time_text = f"{match.group('h1')}-{match.group('h2')}"
+    if not time_text:
+        hour = node.get("hour") or node.get("startHour")
+        if hour is not None and end:
+            time_text = f"{hour}-{end}"
+
+    title = strip_html(node.get("title") or node.get("name") or entity.get("title") or "")
+    return LessonMeta(
+        number=number,
+        title=title or str(row.get("title") or ""),
+        date_text=date_text,
+        status=status,
+        status_kind=status_kind,
+        progress=progress,
+        time_text=time_text,
+        topics=topics,
+    )
 
 
 def test_title(row: dict[str, Any]) -> str:

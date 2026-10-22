@@ -20,6 +20,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from mt.ui.pages import LessonCard  # noqa: E402
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -35,7 +37,7 @@ def window(app, tmp_path, monkeypatch):
     from tests.fake_server import SUBJECT_ID, FakeServer
 
     monkeypatch.setattr(config, "COOKIES_PATH", tmp_path / "cookies.json")
-    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
     db.set_database_path(tmp_path / "ui.sqlite3")
     db.init()
     with FakeServer() as server:
@@ -229,28 +231,32 @@ def _wait_sync(app, window, timeout: float = 30.0) -> None:
 
 
 def test_course_structure_appears_in_sidebar_and_pages(app, window):
-    """Course → lesson → subject → kbs, both in the tree and on the pages."""
+    """Предмет → занятие → домашка in the tree and on the pages."""
     from PyQt6.QtCore import Qt
 
     from tests.fake_server import (
         COURSE_ID,
+        KBS_EXTRA,
+        KBS_ONLINE,
         LESSON_DB_ID,
         LESSON_ENTITY_ID,
-        SUBJECT_ID,
     )
 
     _subscribe_course(app, window)
 
     tree = window.sidebar.tree
-    assert tree.topLevelItemCount() == 1  # the subject is grouped under the course
+    assert tree.topLevelItemCount() == 1  # the practice subject is not a separate item
     course_item = tree.topLevelItem(0)
     assert course_item.data(0, Qt.ItemDataRole.UserRole) == ("course", COURSE_ID)
     assert course_item.childCount() == 2
     lesson_item = course_item.child(0)
     assert lesson_item.data(0, Qt.ItemDataRole.UserRole) == ("lesson", LESSON_DB_ID)
-    subject_item = lesson_item.child(0)
-    assert subject_item.data(0, Qt.ItemDataRole.UserRole) == ("subject", SUBJECT_ID)
-    assert subject_item.childCount() == 2  # two knowledge bases of the subject
+    # a lesson holds homeworks directly; there is no «subject» level any more
+    homework_ids = [
+        lesson_item.child(index).data(0, Qt.ItemDataRole.UserRole)[1]
+        for index in range(lesson_item.childCount())
+    ]
+    assert homework_ids == [KBS_ONLINE, KBS_EXTRA]
 
     window.navigate("courses")
     assert window.stack.currentWidget() is window.courses_page
@@ -258,6 +264,9 @@ def test_course_structure_appears_in_sidebar_and_pages(app, window):
     assert window.stack.currentWidget() is window.course_page
     window.navigate(f"lesson:{LESSON_DB_ID}")
     assert window.stack.currentWidget() is window.lesson_page
+    window.navigate(f"homework:{KBS_ONLINE}")
+    assert window.stack.currentWidget() is window.homework_page
+    assert window.homework_page.chip_count() == 5
 
     window.navigate("test:1001")
     app.processEvents()
@@ -312,3 +321,91 @@ def test_task_link_syncs_subject_and_then_opens_test(app, window):
     assert window.test_page.test_id == 1001
     assert window.stack.currentWidget() is window.test_page
     assert window._pending_test is None
+
+
+def test_subject_page_shows_lessons_with_homework(app, window):
+    """The subject page looks like the site: «Занятие N · date» + homework."""
+
+    _subscribe_course(app, window)
+    window.navigate("subject:777")
+    app.processEvents()
+    page = window.subject_page
+    cards = [page.body.itemAt(index).widget() for index in range(page.body.count())]
+    cards = [card for card in cards if isinstance(card, LessonCard)]
+    # только занятия, где у этого предмета есть практика
+    assert len(cards) == 1
+    first = cards[0]
+    assert first.meta.heading == "Занятие 1"
+    assert first.meta.date_text == "3 сентября"
+    assert first.meta.status == "Посещено"
+    assert first.meta.progress == 100
+    assert first.meta.topics
+    rows = [
+        first.homework_box.layout().itemAt(index).widget()
+        for index in range(first.homework_box.layout().count())
+    ]
+    assert len(rows) == 2  # both homeworks belong to this lesson
+
+    # на странице предмета видны все занятия курса, включая теоретические
+    window.navigate("course:111137")
+    app.processEvents()
+    course_cards = [
+        window.course_page.body.itemAt(index).widget()
+        for index in range(window.course_page.body.count())
+    ]
+    course_cards = [card for card in course_cards if isinstance(card, LessonCard)]
+    assert len(course_cards) == 2
+    assert course_cards[1].meta.heading == "Занятие 2"
+
+
+def test_homework_page_has_numbered_chips(app, window):
+    """Numbers on top switch tests inside the homework."""
+    from tests.fake_server import KBS_ONLINE, TESTS_ONLINE
+
+    _subscribe_course(app, window)
+    window.navigate(f"homework:{KBS_ONLINE}")
+    app.processEvents()
+    page = window.homework_page
+    assert page.chip_count() == len(TESTS_ONLINE)
+    assert page.index == 0
+
+    page.open_test_at(3)
+    app.processEvents()
+    assert page.index == 3
+    assert page._tests[3]["id"] == TESTS_ONLINE[3]["id"]
+    assert window._current_target() == f"homework:{KBS_ONLINE}"
+
+    page.go_next()
+    page.go_previous()
+    page.go_previous()
+    app.processEvents()
+    assert page.index == 2
+
+    page.open_current_test()
+    app.processEvents()
+    assert window.stack.currentWidget() is window.test_page
+    assert window.test_page.test_id == TESTS_ONLINE[2]["id"]
+
+
+def test_homework_page_without_tests_shows_empty_state(app, window):
+    from mt import db
+    from tests.fake_server import KBS_OFFLINE
+
+    _subscribe_course(app, window)
+    db.replace_kbs_tests(KBS_OFFLINE, 777, [])
+    window.navigate(f"homework:{KBS_OFFLINE}")
+    app.processEvents()
+    assert window.homework_page.chip_count() == 0
+
+
+def test_lesson_card_collapses_homework(app, window):
+    from tests.fake_server import LESSON_DB_ID
+
+    _subscribe_course(app, window)
+    window.navigate(f"lesson:{LESSON_DB_ID}")
+    app.processEvents()
+    page = window.lesson_page
+    cards = [page.body.itemAt(index).widget() for index in range(page.body.count())]
+    cards = [card for card in cards if isinstance(card, LessonCard)]
+    assert cards == []  # the lesson page lists homeworks, not lesson cards
+    assert window.stack.currentWidget() is window.lesson_page
