@@ -12,16 +12,20 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-SUBJECT_ID = 777
-SUBJECT_TITLE = "Тестовый предмет"
-KBS_ONLINE = 501
-KBS_OFFLINE = 502
-#: second homework of the first lesson — one lesson may have several
-KBS_EXTRA = 503
+#: Terminology follows the site URLs:
+#:   courses/<id> = предмет, lesson/<id> = урок, subjects/<id> = домашка,
+#:   kbs/<id> = раздел внутри домашки.
+SUBJECT_ID = 777          # домашка первого урока
+SUBJECT_TITLE = "Домашка №1"
+SUBJECT2_ID = 888         # домашка второго урока
+SUBJECT2_TITLE = "Домашка №2"
+KBS_ONLINE = 501          # раздел домашки №1
+KBS_EXTRA = 503           # второй раздел той же домашки
+KBS_OFFLINE = 502         # единственный раздел домашки №2
 
 #: Course used by the course-structure tests (v3 education-groups API).
 COURSE_ID = 111137
-COURSE_TITLE = "Демо-курс"
+COURSE_TITLE = "История России"
 LESSON_ENTITY_ID = 4772366
 LESSON_DB_ID = 41907128
 LESSON2_ENTITY_ID = 4772367
@@ -47,7 +51,7 @@ LESSONS_PAYLOAD = {
             "id": LESSON2_DB_ID,
             "position": 2,
             "number": 2,
-            "title": "Урок 2. Только теория",
+            "title": "Урок 2. Феодальные войны",
             "date": "2025-09-10T19:40:00",
             "status": "viewed",
             "progress": 100,
@@ -68,7 +72,7 @@ LESSON_STRUCTURES = {
                 {"type": "curriculum_theory_block", "entityInfo": {"id": 11, "title": "Теория"}},
                 {
                     "type": "curriculum_practice_block",
-                    "entityInfo": {"id": SUBJECT_ID, "title": "Практика"},
+                    "entityInfo": {"id": SUBJECT_ID, "title": SUBJECT_TITLE},
                 },
                 {"type": "curriculum_test_block", "entityInfo": {"id": 12, "title": "Квиз"}},
             ],
@@ -79,6 +83,10 @@ LESSON_STRUCTURES = {
             "id": LESSON2_DB_ID,
             "children": [
                 {"type": "curriculum_theory_block", "entityInfo": {"id": 13, "title": "Лекция"}},
+                {
+                    "type": "curriculum_practice_block",
+                    "entityInfo": {"id": SUBJECT2_ID, "title": SUBJECT2_TITLE},
+                },
             ],
         }
     },
@@ -176,28 +184,31 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(404, {"error": "unknown lesson"})
             return
-        if path == f"/api/v1/content/practice/curriculumsubject/{SUBJECT_ID}":
-            self._send(200, {
-                "id": SUBJECT_ID,
-                "title": SUBJECT_TITLE,
-                "tree": {
-                    "online": [
-                        {"id": KBS_ONLINE, "title": "Домашка 1", "lessonId": LESSON_ENTITY_ID},
-                        {"id": KBS_EXTRA, "title": "Домашка 2", "lessonId": LESSON_ENTITY_ID},
-                        {"id": KBS_OFFLINE, "title": "Домашка 3", "lessonId": LESSON2_ENTITY_ID},
-                    ],
-                    "offline": [],
-                    "aftertheory": [],
-                },
-            })
-            return
-        for kbs_id, mode, tests in (
-            (KBS_ONLINE, "online", TESTS_ONLINE),
-            (KBS_EXTRA, "online", TESTS_EXTRA),
-            (KBS_OFFLINE, "offline", TESTS_OFFLINE),
+        for subject_id, title, online in (
+            (SUBJECT_ID, SUBJECT_TITLE, [
+                {"id": KBS_ONLINE, "title": "Раздел 1"},
+                {"id": KBS_EXTRA, "title": "Раздел 2"},
+            ]),
+            # 502 is listed under "online" on purpose: its tests only answer in
+            # "offline" mode, so the mode-fallback path is exercised.
+            (SUBJECT2_ID, SUBJECT2_TITLE, [{"id": KBS_OFFLINE, "title": "Раздел 3"}]),
+        ):
+            if path == f"/api/v1/content/practice/curriculumsubject/{subject_id}":
+                self._send(200, {
+                    "id": subject_id,
+                    "title": title,
+                    # no lessonId here: the link lesson → домашка comes from the
+                    # lesson structure, exactly like the real backend
+                    "tree": {"online": online, "offline": [], "aftertheory": []},
+                })
+                return
+        for subject_id, kbs_id, mode, tests in (
+            (SUBJECT_ID, KBS_ONLINE, "online", TESTS_ONLINE),
+            (SUBJECT_ID, KBS_EXTRA, "online", TESTS_EXTRA),
+            (SUBJECT2_ID, KBS_OFFLINE, "offline", TESTS_OFFLINE),
         ):
             if path == (
-                f"/api/v1/content/practice/curriculumsubject/{SUBJECT_ID}"
+                f"/api/v1/content/practice/curriculumsubject/{subject_id}"
                 f"/knowledgebase/{kbs_id}/{mode}/tests"
             ):
                 self._send(200, [] if state.empty_tests else tests)

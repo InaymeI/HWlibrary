@@ -177,7 +177,7 @@ class ClickableFrame(QFrame):
 
 
 class ListRow(ClickableFrame):
-    """A knowledge base / test row used inside the subject page."""
+    """A раздел / домашка row used inside the lesson and course pages."""
 
     def __init__(
         self,
@@ -203,11 +203,15 @@ class ListRow(ClickableFrame):
 
         text_box = QVBoxLayout()
         text_box.setSpacing(3)
-        title_label = label(title, "h3", wrap=True)
-        title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        text_box.addWidget(title_label)
+        self.title_label = label(title, "h3", wrap=True)
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        text_box.addWidget(self.title_label)
+        self.subtitle_label: QLabel | None = None
         if subtitle:
-            text_box.addWidget(label(subtitle, "muted", wrap=True))
+            self.subtitle_label = label(subtitle, "muted", wrap=True)
+            text_box.addWidget(self.subtitle_label)
         if badges:
             badge_box = QHBoxLayout()
             badge_box.setSpacing(6)
