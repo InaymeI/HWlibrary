@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from PyQt6 import sip
 from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
@@ -141,7 +142,7 @@ class Sidebar(QWidget):
         self.footer_hint = label("F5 — синхронизация", "muted")
         footer_layout.addWidget(self.footer_hint)
         layout.addWidget(footer)
-        self._expanded_state: dict[str, bool] = QSettings().value("sidebar/expanded", None, type=dict) or {}
+        self._expanded_state: dict[str, bool] = _load_expanded_state()
 
         self.tree.itemExpanded.connect(lambda _: self._save_expanded())
         self.tree.itemCollapsed.connect(lambda _: self._save_expanded())
@@ -554,9 +555,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("window/splitter", self.splitter.sizes())
         self.settings.setValue("ui/log", self.log_dock.isVisible())
-        if self._sync and self._sync.isRunning():
-            self._sync.stop()
-            self._sync.wait(2500)
+        thread = self._sync_thread()
+        if thread is not None and thread.isRunning():
+            thread.stop()
+            thread.wait(2500)
+        self._sync = None
         db.close()
         super().closeEvent(event)
 
@@ -797,8 +800,26 @@ class MainWindow(QMainWindow):
         self.import_cookies()
         return self.api.has_cookies()
 
+    def _sync_thread(self) -> SyncThread | None:
+        """Return the worker only if its C++ object still exists.
+
+        ``thread.finished`` is connected to ``deleteLater``, so after a run the
+        wrapper in ``self._sync`` dangles; touching it raises
+        ``RuntimeError: wrapped C/C++ object ... has been deleted``.
+        """
+        thread = self._sync
+        if thread is None or sip.isdeleted(thread):
+            self._sync = None
+            return None
+        return thread
+
+    def _on_sync_thread_finished(self) -> None:
+        if self.sender() is self._sync:
+            self._sync = None
+
     def _start_sync(self, subject_ids: list[int]) -> None:
-        if self._sync and self._sync.isRunning():
+        current = self._sync_thread()
+        if current is not None and current.isRunning():
             self.toast("Синхронизация уже идёт", error=True)
             return
         self._sync_queue_results = []
@@ -808,6 +829,7 @@ class MainWindow(QMainWindow):
         thread.subject_done.connect(self._on_subject_done)
         thread.finished_all.connect(self._on_sync_finished)
         thread.failed.connect(self._on_sync_failed)
+        thread.finished.connect(self._on_sync_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._sync = thread
         self.progress.setVisible(True)
@@ -820,8 +842,9 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def stop_sync(self) -> None:
-        if self._sync and self._sync.isRunning():
-            self._sync.stop()
+        thread = self._sync_thread()
+        if thread is not None and thread.isRunning():
+            thread.stop()
             self.act_stop.setEnabled(False)
             self.status_label.setText("Останавливаю синхронизацию…")
             self._append_log("— запрошена остановка")
@@ -850,7 +873,8 @@ class MainWindow(QMainWindow):
         self.act_sync_selected.setEnabled(True)
         self.act_sync_all.setEnabled(True)
         total_tests = sum(result.tests for result in results)
-        errors = sum(result.errors for result in results)
+        failed_subjects = sum(1 for result in results if result.error)
+        errors = sum(result.errors for result in results) + failed_subjects
         seconds = sum(result.seconds for result in results)
         if results:
             parts = [
@@ -886,13 +910,33 @@ class MainWindow(QMainWindow):
         )
         if not ok or not text.strip():
             return
-        subject_id = _extract_subject_id(text)
+        subject_id, lesson_hint = _parse_subject_url(text)
         if subject_id is None:
             self.toast("Не удалось найти ID предмета в строке", error=True)
             return
+        if lesson_hint is not None:
+            # /lesson/<lessonId>/subjects/<subjectId>/practice/kbs/... — the
+            # reference lists this URL as a lessonId fallback.
+            self.set_lesson_hint(subject_id, lesson_hint)
         if not self._ensure_cookies():
             return
         self._start_sync([subject_id])
+
+    # ------------------------------------------------------------------ #
+    # lessonId hints (fallback when the tree has no lessonId)
+    # ------------------------------------------------------------------ #
+    def lesson_hint(self, subject_id: int | None) -> int | None:
+        if subject_id is None:
+            return None
+        hints = _load_lesson_hints()
+        value = hints.get(str(subject_id))
+        return int(value) if value else None
+
+    def set_lesson_hint(self, subject_id: int, lesson_id: int) -> None:
+        hints = _load_lesson_hints()
+        if hints.get(str(subject_id)) != lesson_id:
+            hints[str(subject_id)] = int(lesson_id)
+            QSettings().setValue("lesson/hints", json.dumps(hints))
 
     def import_cookies(self) -> None:
         dialog = CookieDialog(self.api, self)
@@ -1086,15 +1130,62 @@ def _to_int(value: str) -> int | None:
         return None
 
 
-def _extract_subject_id(text: str) -> int | None:
+def _parse_subject_url(text: str) -> tuple[int | None, int | None]:
+    """Extract ``(subject_id, lesson_id)`` from a pasted URL or a bare id.
+
+    Understands ``/subjects/<id>/`` and the practice URL pattern from the API
+    reference: ``/lesson/<lessonId>/subjects/<subjectId>/practice/kbs/...``
+    """
     import re
 
     text = text.strip()
     direct = _to_int(text)
     if direct is not None:
-        return direct
-    match = re.search(r"/subjects?/(\d+)", text) or re.search(r"(\d{2,})", text)
-    return int(match.group(1)) if match else None
+        return direct, None
+
+    practice = re.search(r"/lesson/(\d+)/subjects/(\d+)/practice", text)
+    if practice:
+        return int(practice.group(2)), int(practice.group(1))
+
+    subject = re.search(r"/subjects/(\d+)", text)
+    if subject:
+        return int(subject.group(1)), None
+
+    fallback = re.search(r"(\d{2,})", text)
+    return (int(fallback.group(1)) if fallback else None), None
+
+
+def _extract_subject_id(text: str) -> int | None:
+    """Backwards compatible helper (subject id only)."""
+    return _parse_subject_url(text)[0]
+
+
+def _load_lesson_hints() -> dict[str, int]:
+    raw = QSettings().value("lesson/hints", "")
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    hints: dict[str, int] = {}
+    for key, value in data.items():
+        try:
+            hints[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return hints
+
+
+def _load_expanded_state() -> dict[str, bool]:
+    raw = QSettings().value("sidebar/expanded", "")
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): bool(value) for key, value in data.items()}
 
 
 def _short_time(timestamp: int) -> str:

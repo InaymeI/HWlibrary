@@ -119,26 +119,81 @@ def _parse_option(item: dict[str, Any], index: int) -> AnswerOption | None:
         if item.get("isRightAnswer") is not None
         else item.get("isRight") or item.get("right") or item.get("isCorrect")
     )
+    # ``sort`` may legitimately be 0 (the API starts numbering at zero), so it
+    # must not be collapsed into "missing" by a falsy fallback.
+    sort_value = _as_int(item.get("sort"))
     return AnswerOption(
         id=str(item.get("id", index)),
         text=text,
         variants=variants,
         is_right=is_right,
-        sort=_as_int(item.get("sort")) or index,
+        sort=index if sort_value is None else sort_value,
     )
 
 
-def _raw_answers(payload: dict[str, Any]) -> list[Any]:
+#: Right answers may be nested (GET /tests/{id} shape from the API reference):
+#: ``data.studentTestResult.educationTest.educationTestRightAnswers``
+#: or ``data.educationTestRightAnswers``.
+_NESTED_ANSWER_PATHS = (
+    ("data", "studentTestResult", "educationTest"),
+    ("studentTestResult", "educationTest"),
+    ("data",),
+)
+
+
+def _answers_from(node: Any) -> list[Any] | None:
+    if not isinstance(node, dict):
+        return None
     for key in (
         "educationTestAnswers",
         "educationTestRightAnswers",
+        "educationTest",
         "answers",
         "testAnswers",
         "variants",
     ):
-        value = payload.get(key)
-        if isinstance(value, list):
+        value = node.get(key)
+        if isinstance(value, list) and value:
             return value
+    return None
+
+
+_TEST_NODE_KEYS = (
+    "content", "question", "text", "statement", "type",
+    "educationTestAnswers", "educationTestRightAnswers",
+)
+
+
+def test_node(payload: dict[str, Any]) -> dict[str, Any]:
+    """Find the object that actually holds the test fields.
+
+    Answers may be wrapped in ``data.studentTestResult.educationTest``; in that
+    case the condition and type live there as well, not at the top level.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if any(key in payload for key in _TEST_NODE_KEYS):
+        return payload
+    for path in _NESTED_ANSWER_PATHS:
+        node: Any = payload
+        for step in path:
+            node = node.get(step) if isinstance(node, dict) else None
+        if isinstance(node, dict) and any(key in node for key in _TEST_NODE_KEYS):
+            return node
+    return payload
+
+
+def _raw_answers(payload: dict[str, Any]) -> list[Any]:
+    found = _answers_from(payload)
+    if found:
+        return found
+    for path in _NESTED_ANSWER_PATHS:
+        node: Any = payload
+        for step in path:
+            node = node.get(step) if isinstance(node, dict) else None
+        found = _answers_from(node)
+        if found:
+            return found
     return []
 
 
@@ -196,18 +251,19 @@ def _parse_cached(
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    ttype = str(payload.get("type") or cached_type or "").strip()
-    question = _question_html(payload)
+    node = test_node(payload)
+    ttype = str(node.get("type") or payload.get("type") or cached_type or "").strip()
+    question = _question_html(node) or _question_html(payload)
     return TestDetails(
         id=test_id,
         subject_id=subject_id,
         kbs_id=kbs_id,
         type=ttype,
-        title=_title(payload, f"Тест #{test_id}"),
+        title=_title(node, _title(payload, f"Тест #{test_id}")),
         question_html=question,
         question_text=strip_html(question),
         options=parse_options(payload),
-        lesson_id=_lesson_id(payload),
+        lesson_id=_lesson_id(node) or _lesson_id(payload),
         raw=payload,
     )
 
@@ -334,26 +390,49 @@ def extract_kbs_entries(base: dict[str, Any] | None) -> list[KbsEntry]:
     )
 
 
+def unwrap_test(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the actual test object from list items that wrap it.
+
+    The reference mentions the ``studentTestResult.educationTest`` wrapper for
+    the single-test endpoint; being tolerant here costs nothing.
+    """
+    if item.get("id") is not None:
+        return item
+    for key in ("educationTest", "test", "data"):
+        inner = item.get(key)
+        if isinstance(inner, dict):
+            if inner.get("id") is not None:
+                return inner
+            nested = unwrap_test(inner)
+            if nested is not None:
+                return nested
+    return None
+
+
 def extract_tests(payload: Any) -> list[dict[str, Any]]:
     """Pull a list of test objects out of an unknown response shape."""
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict) and item.get("id") is not None]
+        return [
+            test
+            for item in payload
+            if isinstance(item, dict)
+            for test in [unwrap_test(item)]
+            if test is not None
+        ]
     if isinstance(payload, dict):
         for key in ("tests", "items", "data", "educationTests", "result"):
             value = payload.get(key)
             if isinstance(value, list):
-                return [
-                    item for item in value
-                    if isinstance(item, dict) and item.get("id") is not None
-                ]
+                return extract_tests(value)
             if isinstance(value, dict):
                 nested = extract_tests(value)
                 if nested:
                     return nested
-        if payload.get("id") is not None and (
-            "type" in payload or "educationTestAnswers" in payload
+        unwrapped = unwrap_test(payload)
+        if unwrapped is not None and (
+            "type" in unwrapped or "educationTestAnswers" in unwrapped
         ):
-            return [payload]
+            return [unwrapped]
     return []
 
 

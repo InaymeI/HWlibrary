@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import threading
+import time
 from typing import Any
 
 import requests
@@ -172,7 +173,36 @@ class Api:
     # ------------------------------------------------------------------ #
     # HTTP
     # ------------------------------------------------------------------ #
-    def _request(self, method: str, path: str, *, payload: dict[str, Any] | None = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        attempts: int = 1,
+        retry_delay: float = 0.0,
+    ) -> Any:
+        """Perform a request, optionally retrying transient failures.
+
+        ``attempts``/``retry_delay`` are used by POST /tests: the reference
+        specifies up to 3 attempts with a 400 ms pause.  Authorization errors
+        are never retried; 4xx client errors are retried only for 429.
+        """
+        last_error: ApiError | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                return self._request_once(method, path, payload)
+            except (AuthError, ApiError) as exc:
+                last_error = exc
+                status = getattr(exc, "status", None) or 0
+                transient = status == 429 or status >= 500 or isinstance(exc, NetworkError)
+                if isinstance(exc, AuthError) or not transient or attempt >= attempts:
+                    raise
+                with contextlib.suppress(Exception):
+                    time.sleep(retry_delay * attempt)
+        raise last_error or ApiError("Запрос не выполнен")
+
+    def _request_once(self, method: str, path: str, payload: dict[str, Any] | None) -> Any:
         url = config.BASE_URL + path
         headers = {}
         if self._cookies:
@@ -261,6 +291,12 @@ class Api:
         answer: list,
         spent_time: int,
     ) -> Any:
+        """Send an answer.
+
+        Body and path follow the reference exactly; ``lessonId`` is a string.
+        Transient failures are retried up to ``POST_ATTEMPTS`` times with a
+        400 ms pause (never on 401/403/4xx).
+        """
         return self._request(
             "POST",
             config.ENDPOINTS["post_answer"].format(subject_id=subject_id, test_id=test_id),
@@ -270,6 +306,8 @@ class Api:
                 "answer": answer,
                 "spentTime": int(spent_time),
             },
+            attempts=config.POST_ATTEMPTS,
+            retry_delay=config.POST_RETRY_DELAY,
         )
 
     def try_get_courses(self) -> Any | None:

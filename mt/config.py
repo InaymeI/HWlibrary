@@ -35,9 +35,16 @@ SUPPORTED_TYPES = frozenset({"type1", "type2", "type3", "type4", "type5"})
 SUPPORTED_TYPES_SQL = ", ".join(f"'{t}'" for t in sorted(SUPPORTED_TYPES))
 
 REQUEST_TIMEOUT = (10, 30)  # (connect, read) seconds
+#: Retries for idempotent GETs (handled by urllib3).
 REQUEST_RETRIES = 2
-#: Small pause between sync requests: polite to the backend and avoids bursts.
-SYNC_DELAY_MS = 60
+#: POST /tests raises retries to 3 attempts with a 400 ms pause (API reference).
+POST_ATTEMPTS = 3
+POST_RETRY_DELAY = 0.4
+#: Pause between sync requests. The reference notes a 300-400 ms delay for
+#: existing scripts and that rate limiting is unknown, so stay conservative.
+SYNC_DELAY_MS = 300
+#: Time range imitated in `spentTime` for an answer (API reference: 45-90 s).
+SPENT_TIME_RANGE = (45, 90)
 
 
 def _base_dir(env: str, default: str, override_env: str | None = None) -> Path:

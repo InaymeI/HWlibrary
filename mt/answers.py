@@ -1,17 +1,22 @@
 """Building the answer payload that the API expects.
 
-MaximumTest test types (as observed in the web client):
+Test types (according to the internal API reference):
 
-``type1``-``type2``
-    single / multiple choice — answer is a list of option ids.
-``type3``, ``type4``
-    text inputs — answer is the list of the right variants in order.
+``type1``
+    single choice — answer is the id of the right option.
+``type2``
+    multiple choice — answer is the list of the right option ids.
+``type3``
+    matching — answer is the list of option texts taken in ``sort`` order.
+``type4``
+    sequencing — same as ``type3``.
 ``type5``
-    matching / sequencing — answer is one *variant* picked per right answer.
+    free text input: **one field per right answer**.  Each field may list
+    several acceptable spellings in ``variants``, so a variant is chosen per
+    field independently (``random.choice``); an empty string when there are no
+    variants.
 
-The previous implementation picked a random variant per right answer
-independently, which can produce mixed-up pairs (left from one variant set,
-right from another).  Here a consistent variant index is chosen once per test.
+The result is always a ``list`` of strings/ids ready to be sent as ``answer``.
 """
 
 from __future__ import annotations
@@ -29,16 +34,18 @@ __all__ = [
     "parse_options",
 ]
 
+#: ``type5`` fields may accept several spellings; pick one per field.
+TEXT_INPUT_TYPES = ("type5",)
+#: Types whose answer is the right variants in ``sort`` order.
+ORDERED_TEXT_TYPES = ("type3", "type4")
 
-def _consistent_variant_index(right: list[AnswerOption], rng: random.Random | None) -> int:
-    """Pick one variant column that is available for *all* right answers."""
-    sizes = [len(option.variants) for option in right]
-    if not sizes or min(sizes) == 0:
-        return 0
-    common = min(sizes)
-    if common == 1:
-        return 0
-    return (rng or random).randrange(common)
+
+def _pick_variant(field: AnswerOption, rng: random.Random | None) -> str:
+    """Return one acceptable text for a ``type5`` field ("" when unavailable)."""
+    variants = [variant for variant in field.variants if variant != ""]
+    if not variants:
+        return ""
+    return (rng or random).choice(variants)
 
 
 def build_answer(
@@ -46,7 +53,10 @@ def build_answer(
     *,
     rng: random.Random | None = None,
 ) -> list:
-    """Return the answer payload for a test."""
+    """Return the ``answer`` array for a test.
+
+    ``rng`` makes the result deterministic in tests.
+    """
     details = (
         payload_or_details
         if isinstance(payload_or_details, TestDetails)
@@ -58,14 +68,13 @@ def build_answer(
         right = list(extract_right_answers(details.raw))
     right.sort(key=lambda option: option.sort)
 
-    if details.type == "type5":
-        index = _consistent_variant_index(right, rng)
+    if details.type in TEXT_INPUT_TYPES:
+        return [_pick_variant(option, rng) for option in right]
+    if details.type in ORDERED_TEXT_TYPES:
         return [
-            option.variants[index] if len(option.variants) > index else ""
+            option.variants[0] if option.variants else option.text
             for option in right
         ]
-    if details.type in ("type3", "type4"):
-        return [option.variants[0] if option.variants else option.text for option in right]
     return [str(option.id) for option in right]
 
 
@@ -91,9 +100,13 @@ def _details_from_payload(payload: dict[str, Any]) -> TestDetails:
 
 
 def answer_preview(details: TestDetails, limit: int = 3) -> str:
-    """Short human-readable summary of the auto answer (for buttons/tooltips)."""
+    """Short, *stable* summary of the auto answer for tables and tooltips.
+
+    ``type5`` accepts several spellings per field; a fixed seed keeps the
+    preview from flickering between refreshes.
+    """
     try:
-        answer = build_answer(details)
+        answer = build_answer(details, rng=random.Random(details.id))
     except Exception:  # pragma: no cover - defensive, preview must never crash the UI
         return "—"
     if not answer:

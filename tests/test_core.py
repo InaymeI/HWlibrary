@@ -102,26 +102,33 @@ def test_answer_for_text_types_returns_values():
     assert answers.build_answer(details) == ["42"]
 
 
-def test_type5_uses_one_consistent_variant_column():
+def test_type5_picks_one_spelling_per_field():
+    """type5 is a text input: one text per right answer, variants = spellings."""
     details = _details("type5", [
-        {"id": 1, "variants": ["1-a", "1-b"], "isRightAnswer": True},
-        {"id": 2, "variants": ["2-a", "2-b"], "isRightAnswer": True},
-        {"id": 3, "variants": ["3-a"], "isRightAnswer": True},
+        {"id": 1, "variants": ["Москва", "москва"], "isRightAnswer": True, "sort": 0},
+        {"id": 2, "variants": ["Россия"], "isRightAnswer": True, "sort": 1},
+        {"id": 3, "variants": [], "isRightAnswer": True, "sort": 2},
     ])
-    for seed in range(30):
-        import random
+    import random
 
+    seen_first_field = set()
+    for seed in range(40):
         result = answers.build_answer(details, rng=random.Random(seed))
-        # Column 1 is only available for the last option, so column 0 must win.
-        assert result == ["1-a", "2-a", "3-a"]
+        assert len(result) == 3
+        assert result[0] in {"Москва", "москва"}
+        assert result[1] == "Россия"
+        assert result[2] == ""  # no variants -> empty string
+        seen_first_field.add(result[0])
+    # each field is chosen independently, not forced into one shared column
+    assert seen_first_field == {"Москва", "москва"}
 
 
-def test_type5_respects_sort_order():
-    details = _details("type5", [
-        {"id": 1, "variants": ["second"], "isRightAnswer": True, "sort": 2},
-        {"id": 2, "variants": ["first"], "isRightAnswer": True, "sort": 1},
+def test_type3_and_type4_take_first_variant_in_sort_order():
+    details = _details("type4", [
+        {"id": 1, "variants": ["Б"], "isRightAnswer": True, "sort": 1},
+        {"id": 2, "variants": ["А"], "isRightAnswer": True, "sort": 0},
     ])
-    assert answers.build_answer(details) == ["first", "second"]
+    assert answers.build_answer(details) == ["А", "Б"]
 
 
 def test_answer_without_right_answers_is_empty():
@@ -287,7 +294,7 @@ def test_sync_pipeline_end_to_end(temp_db, monkeypatch):
 
         # answering uses the endpoint from the API docs
         response = api.post_answer(SUBJECT_ID, 9001, 1001, ["11"], 42)
-        assert response["isRight"] is True
+        assert response == {"result": "true", "percent": 100}
         post = server.posts[-1]
         assert post["path"].endswith(f"/curriculumsubject/{SUBJECT_ID}/tests/1001")
         assert post["payload"] == {
@@ -414,3 +421,194 @@ def test_sync_result_reports_failed_subject(temp_db, monkeypatch):
     # auth failure: cache untouched
     assert [row["title"] for row in db.list_tests(501)] == ["Старый тест"]
     assert results[0].error is not None
+
+
+# --------------------------------------------------------------------------- #
+# API reference conformance
+# --------------------------------------------------------------------------- #
+def test_empty_tests_response_does_not_wipe_cache(temp_db, monkeypatch):
+    """«Ошибки и пустые ответы НЕ кэшировать» — keep the previous cache."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import KBS_ONLINE, SUBJECT_ID, TESTS_ONLINE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-empty.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        # first run fills the cache
+        thread = SyncThread(api, [SUBJECT_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+        before = db.kbs_stats(KBS_ONLINE)["total"]
+        assert before == len(TESTS_ONLINE)
+
+        # the backend now answers with empty arrays
+        server.empty_tests = True
+        thread = SyncThread(api, [SUBJECT_ID])
+        results: list = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+        assert db.kbs_stats(KBS_ONLINE)["total"] == before
+        assert results[0].error is None
+
+
+def test_non_array_tests_payload_falls_back_to_another_mode(temp_db, monkeypatch):
+    """A dict answer is not a tests array → the next mode is tried."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import KBS_OFFLINE, SUBJECT_ID, TESTS_OFFLINE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-mode.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+    monkeypatch.setattr(config, "MODES", ("online", "offline", "aftertheory"))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, [SUBJECT_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    # the KBS found in the "online" list only answers in "offline" mode
+    assert db.get_kbs(KBS_OFFLINE)["mode"] == "offline"
+    assert db.kbs_stats(KBS_OFFLINE)["total"] == len(TESTS_OFFLINE)
+
+
+def test_post_answer_retries_transient_failures(monkeypatch):
+    from mt.api import Api
+    from tests.fake_server import SUBJECT_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-post.json")
+    monkeypatch.setattr(config, "POST_RETRY_DELAY", 0.01)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        server.fail_posts = 2  # two 500s, then success
+
+        response = api.post_answer(SUBJECT_ID, 111213, 1001, ["11"], 67)
+        assert response == {"result": "true", "percent": 100}
+        assert server.post_attempts == 3  # 3 attempts as documented
+        assert server.posts[-1]["payload"] == {
+            "lessonId": "111213",
+            "attaches": [],
+            "answer": ["11"],
+            "spentTime": 67,
+        }
+
+
+def test_post_answer_does_not_retry_client_errors(monkeypatch):
+    from mt.api import Api, ApiError
+    from tests.fake_server import SUBJECT_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-post2.json")
+    monkeypatch.setattr(config, "POST_RETRY_DELAY", 0.01)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        server.post_status = 400
+
+        with pytest.raises(ApiError):
+            api.post_answer(SUBJECT_ID, 111213, 1001, ["11"], 60)
+        assert server.post_attempts == 1
+
+
+def test_answer_response_verdict_matches_documented_shape():
+    from mt.ui.dialogs import parse_result
+
+    assert parse_result({"result": "true", "percent": 100})[0] is True
+    assert parse_result({"result": "false", "percent": 0})[0] is False
+    assert parse_result({"result": True})[0] is True
+    assert parse_result({"percent": 100})[0] is True
+    assert parse_result({"percent": 40})[0] is False
+    assert parse_result({}) == (None, None)
+    assert parse_result("garbage") == (None, None)
+
+
+def test_subject_url_parsing_supports_practice_lesson_url():
+    from mt.ui.main_window import _parse_subject_url
+
+    assert _parse_subject_url("12345") == (12345, None)
+    assert _parse_subject_url("https://education.maximumtest.ru/subjects/777/") == (777, None)
+    assert _parse_subject_url(
+        "https://education.maximumtest.ru/lesson/111213/subjects/999/practice/kbs/67890/"
+    ) == (999, 111213)
+
+
+def test_nested_right_answers_from_single_test_endpoint(temp_db):
+    """GET /tests/{id} may wrap answers in data.studentTestResult.educationTest."""
+    payload = {
+        "data": {
+            "studentTestResult": {
+                "educationTest": {
+                    "id": 42,
+                    "type": "type2",
+                    "title": "Обёрнутый тест",
+                    "content": "<p>Условие</p>",
+                    "lessonId": 111213,
+                    "educationTestRightAnswers": [
+                        {"id": 1, "isRightAnswer": True, "variants": ["a"], "sort": 0},
+                        {"id": 2, "isRightAnswer": False, "variants": ["b"], "sort": 1},
+                        {"id": 3, "isRightAnswer": True, "variants": ["c"], "sort": 2},
+                    ],
+                }
+            }
+        }
+    }
+    row = {
+        "id": 42,
+        "subject_id": 1,
+        "kbs_id": 1,
+        "type": "",
+        "fetched_at": 0,
+        "payload_json": json.dumps(payload),
+    }
+    details = models.test_details(row)
+    assert details.type == "type2"
+    assert details.title == "Обёрнутый тест"
+    assert details.question_text == "Условие"
+    assert details.lesson_id == 111213
+    assert answers.build_answer(details) == ["1", "3"]
+
+
+def test_empty_subject_payload_does_not_overwrite_cache(temp_db, monkeypatch):
+    """A 200 with an empty body must not clobber a good cached subject."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import SUBJECT_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-empty-subj.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+
+    db.upsert_subject(SUBJECT_ID, "Нормальное имя", {"title": "Нормальное имя"})
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        # the backend answers with an object that has no title and no tree
+        monkeypatch.setattr(api, "get_curriculum_subject", lambda _sid: {})
+
+        thread = SyncThread(api, [SUBJECT_ID])
+        results: list = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    assert db.get_subject(SUBJECT_ID)["title"] == "Нормальное имя"
+    assert results[0].error

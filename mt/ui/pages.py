@@ -657,6 +657,7 @@ class TestPage(ScrollPage):
         self._siblings: list[int] = []
         self._opened_at = time.monotonic()
         self._palette = main.theme_palette()
+        self._answer: list | None = None
 
     # ------------------------------------------------------------------ #
     def show_test(self, test_id: int) -> None:
@@ -840,8 +841,11 @@ class TestPage(ScrollPage):
             return
 
         try:
-            answer = build_answer(details)
+            # Build once: the shown chips must be exactly what will be sent
+            # (type5 has several acceptable spellings to choose from).
+            answer = self._answer = build_answer(details)
         except Exception as exc:  # noqa: BLE001
+            self._answer = None
             layout.addWidget(label(f"Не удалось собрать ответ: {exc}", "muted", wrap=True))
             self.body.addWidget(card)
             return
@@ -882,8 +886,11 @@ class TestPage(ScrollPage):
         send_row.addWidget(lesson_caption)
         self.lesson_input = QSpinBox()
         self.lesson_input.setRange(0, 2_147_483_647)
+        # lessonId comes from the tree; when it is missing the reference
+        # suggests the practice URL (/lesson/<id>/subjects/<id>/practice/kbs/…)
         fallback_lesson = (self.kbs or {}).get("lesson_id") or 0
-        self.lesson_input.setValue(details.lesson_id or fallback_lesson)
+        hint = self.main.lesson_hint(row.get("subject_id"))
+        self.lesson_input.setValue(details.lesson_id or fallback_lesson or hint or 0)
         self.lesson_input.setMinimumWidth(150)
         send_row.addWidget(self.lesson_input)
         send_row.addStretch(1)
@@ -945,8 +952,9 @@ class TestPage(ScrollPage):
         if lesson_id <= 0:
             self.main.toast("Укажите lessonId перед отправкой", error=True)
             return
-        answer = build_answer(details)
-        spent = int(max(20, min(time.monotonic() - self._opened_at, 900)))
+        answer = self._answer if self._answer is not None else build_answer(details)
+        low, high = config.SPENT_TIME_RANGE
+        spent = int(max(low, min(time.monotonic() - self._opened_at, high)))
         if not self.main.confirm_send(details, answer, lesson_id, spent):
             return
         try:
