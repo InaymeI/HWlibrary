@@ -165,7 +165,7 @@ python -m venv .venv
 
 | Что | Реализация |
 | --- | --- |
-| Уроки предмета | `GET /api/v3/student/education-groups/{courseId}?perPage=50&page=N`; пагинация по `meta.last_page`, дубли по `id` отбрасываются |
+| Уроки предмета | `GET /api/v3/student/education-groups/{courseId}?perPage=50&lastKnownId=<id>`; пагинация курсором по `id` последнего урока (`page` сервер игнорирует), дубли по `id` отбрасываются |
 | Структура урока | `GET /api/v3/student/education-groups/{courseId}/structures/{lessonId}`; блоки практики (`curriculum_practice_block`, вложенные контейнеры, `subjectId`) ищутся на любой глубине, их `entityInfo.id` — это `subjectId` |
 | Привязка домашки к уроку | из структуры урока: блоки практики, их `entityInfo.id` — это `subjectId`; связь хранится в `lesson_subjects` (поле `lessonId` в дереве предмета реальный сервер не присылает) |
 | `entity lesson id` | `entityInfo.id` урока; именно он идёт в `lessonId` тела ответа |
@@ -183,7 +183,7 @@ python -m venv .venv
 
 ```bash
 ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/python -m pytest            # 68 тестов, включая фиктивный сервер
+./.venv/bin/python -m pytest            # 69 тестов, включая фиктивный сервер
 ./.venv/bin/python -m ruff check mt tests
 ```
 

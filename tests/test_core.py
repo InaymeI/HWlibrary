@@ -678,7 +678,6 @@ def test_extract_lessons_and_practice_blocks_from_v3_shapes():
             {"entityInfo": {"id": 4772367, "title": "Без id"}},
             {"title": "мусор"},
         ],
-        "meta": {"last_page": 1},
     })
     assert [lesson.id for lesson in lessons] == [41907128, 4772367]
     assert lessons[0].entity_id == 4772366
@@ -889,7 +888,6 @@ def test_sync_keeps_a_real_title_when_payload_has_none(temp_db, monkeypatch):
                 {"id": 41907128, "title": "Урок 1. Практика",
                  "entityInfo": {"id": 4772366, "title": "Практика"}},
             ],
-            "meta": {"current_page": 1, "last_page": 1},
         }
         monkeypatch.setattr(api, "get_education_group", lambda *a, **k: nameless)
         thread = SyncThread(api, course_ids=[COURSE_ID])
@@ -972,6 +970,39 @@ def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
     stats = db.course_stats(COURSE_ID)
     assert stats["homeworks"] == 2 and stats["total"] == total_tests
     assert stats["sections"] == 3 and stats["lessons"] == 2
+
+
+def test_course_pagination_uses_last_known_id(temp_db, monkeypatch):
+    """`page=N` does not work: the next slice is asked by `lastKnownId`."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, LESSON2_DB_ID, LESSON_DB_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-cursor.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    monkeypatch.setattr(config, "COURSE_PAGE_SIZE", 1)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        thread.start()
+        assert thread.wait(30_000)
+
+        lesson_requests = [
+            path for path in server.requests
+            if path.split("?")[0].endswith(f"education-groups/{COURSE_ID}")
+        ]
+        assert "perPage=1" in lesson_requests[0]
+        assert "lastKnownId" not in lesson_requests[0]
+        assert any(f"lastKnownId={LESSON_DB_ID}" in path for path in lesson_requests)
+        assert any(f"lastKnownId={LESSON2_DB_ID}" in path for path in lesson_requests)
+        # the deprecated page parameter would be rejected by the backend
+        assert all("page=" not in path for path in server.requests)
+
+    lessons = db.course_homeworks(COURSE_ID)["lessons"]
+    assert [lesson["id"] for lesson, _ in lessons] == [LESSON_DB_ID, LESSON2_DB_ID]
 
 
 def test_course_sync_skips_structure_errors(temp_db, monkeypatch):

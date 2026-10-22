@@ -1,8 +1,9 @@
 """In-process fake of education.maximumtest.ru used by the test-suite.
 
-It mimics the endpoints the application talks to, including pagination-free
-lists, cookie checks and the answer endpoint, so the whole sync pipeline can be
-tested without touching the network.
+It mimics the endpoints the application talks to, including ``lastKnownId``
+pagination (a ``page`` parameter is rejected, like the real backend), cookie
+checks and the answer endpoint, so the whole sync pipeline can be tested
+without touching the network.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 #: Terminology follows the site URLs:
 #:   courses/<id> = предмет, lesson/<id> = урок, subjects/<id> = домашка,
@@ -66,7 +68,6 @@ LESSONS_PAYLOAD = {
             "type": "lesson",
         },
     ],
-    "meta": {"current_page": 1, "last_page": 1},
 }
 LESSON_STRUCTURES = {
     LESSON_DB_ID: {
@@ -185,7 +186,24 @@ class _Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?")[0]
         if path == f"/api/v3/student/education-groups/{COURSE_ID}":
-            self._send(200, LESSONS_PAYLOAD)
+            query = parse_qs(urlsplit(self.path).query)
+            if "page" in query:
+                # the real backend ignores it and the client must not send it
+                self._send(400, {"error": "page is not supported; use lastKnownId"})
+                return
+            items = LESSONS_PAYLOAD["data"]
+            per_page = int(query.get("perPage", [str(len(items))])[0])
+            start = 0
+            last_known = query.get("lastKnownId", [""])[0]
+            if last_known:
+                known = int(last_known)
+                ids = [int(item["id"]) for item in items]
+                start = ids.index(known) + 1 if known in ids else len(items)
+            batch = items[start:start + per_page]
+            payload = dict(LESSONS_PAYLOAD)
+            payload["data"] = batch
+            payload["meta"] = {"per_page": per_page, "count": len(batch)}
+            self._send(200, payload)
             return
         if path.startswith(f"/api/v3/student/education-groups/{COURSE_ID}/structures/"):
             lesson_id = path.rsplit("/", 1)[-1]

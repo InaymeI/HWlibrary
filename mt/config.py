@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "maximumtest-desktop"
 APP_TITLE = "MaximumTest Library"
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.5.3"
 ORG_NAME = "maximumtest-desktop"
 
 # ``MT_*`` overrides are handy for development (demo databases, staging hosts).
@@ -33,7 +33,7 @@ ENDPOINTS = {
     ),
 }
 
-#: Pages requested for a course; the backend paginates lessons.
+#: Lessons per request; the backend pages by cursor, not by page number.
 COURSE_PAGE_SIZE = 50
 #: Safety limit for course pagination (a course never has 500 lessons).
 COURSE_MAX_PAGES = 10

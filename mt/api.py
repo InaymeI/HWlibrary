@@ -324,14 +324,21 @@ class Api:
     def get_education_group(
         self,
         course_id: int,
-        page: int = 1,
-        per_page: int = config.COURSE_PAGE_SIZE,
+        last_known_id: int | None = None,
+        per_page: int | None = None,
     ) -> Any:
-        """One page of a course with its lessons."""
+        """One page of a course with its lessons.
+
+        The endpoint paginates by the id of the last lesson, not by a page
+        number: ``?perPage=50&lastKnownId=<id>`` returns the following slice.
+        """
+        params: dict[str, Any] = {"perPage": per_page or config.COURSE_PAGE_SIZE}
+        if last_known_id is not None:
+            params["lastKnownId"] = int(last_known_id)
         return self._request(
             "GET",
             config.ENDPOINTS["education_group"].format(course_id=course_id),
-            params={"perPage": per_page, "page": page},
+            params=params,
         )
 
     def get_lesson_structure(self, course_id: int, lesson_id: int) -> Any:
