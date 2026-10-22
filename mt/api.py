@@ -179,6 +179,7 @@ class Api:
         path: str,
         *,
         payload: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         attempts: int = 1,
         retry_delay: float = 0.0,
     ) -> Any:
@@ -191,7 +192,7 @@ class Api:
         last_error: ApiError | None = None
         for attempt in range(1, max(1, attempts) + 1):
             try:
-                return self._request_once(method, path, payload)
+                return self._request_once(method, path, payload, params)
             except (AuthError, ApiError) as exc:
                 last_error = exc
                 status = getattr(exc, "status", None) or 0
@@ -202,7 +203,13 @@ class Api:
                     time.sleep(retry_delay * attempt)
         raise last_error or ApiError("Запрос не выполнен")
 
-    def _request_once(self, method: str, path: str, payload: dict[str, Any] | None) -> Any:
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
         url = config.BASE_URL + path
         headers = {}
         if self._cookies:
@@ -214,6 +221,7 @@ class Api:
                     method,
                     url,
                     json=payload,
+                    params=params,
                     headers=headers,
                     timeout=config.REQUEST_TIMEOUT,
                     allow_redirects=True,
@@ -261,8 +269,8 @@ class Api:
             with contextlib.suppress(OSError):
                 self.save_cookies()
 
-    def get_json(self, path: str) -> Any:
-        return self._request("GET", path)
+    def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return self._request("GET", path, params=params)
 
     # ------------------------------------------------------------------ #
     # endpoints
@@ -308,6 +316,31 @@ class Api:
             },
             attempts=config.POST_ATTEMPTS,
             retry_delay=config.POST_RETRY_DELAY,
+        )
+
+    # ------------------------------------------------------------------ #
+    # v3: courses → lessons → practice blocks
+    # ------------------------------------------------------------------ #
+    def get_education_group(
+        self,
+        course_id: int,
+        page: int = 1,
+        per_page: int = config.COURSE_PAGE_SIZE,
+    ) -> Any:
+        """One page of a course with its lessons."""
+        return self._request(
+            "GET",
+            config.ENDPOINTS["education_group"].format(course_id=course_id),
+            params={"perPage": per_page, "page": page},
+        )
+
+    def get_lesson_structure(self, course_id: int, lesson_id: int) -> Any:
+        """Structure of a lesson; practice blocks carry the subject ids."""
+        return self._request(
+            "GET",
+            config.ENDPOINTS["lesson_structure"].format(
+                course_id=course_id, lesson_id=lesson_id
+            ),
         )
 
     def try_get_courses(self) -> Any | None:

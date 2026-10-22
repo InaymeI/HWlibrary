@@ -16,6 +16,57 @@ SUBJECT_ID = 777
 KBS_ONLINE = 501
 KBS_OFFLINE = 502
 
+#: Course used by the course-structure tests (v3 education-groups API).
+COURSE_ID = 111137
+COURSE_TITLE = "Демо-курс"
+LESSON_ENTITY_ID = 4772366
+LESSON_DB_ID = 41907128
+LESSON2_ENTITY_ID = 4772367
+LESSON2_DB_ID = 41907129
+LESSONS_PAYLOAD = {
+    "title": COURSE_TITLE,
+    "data": [
+        {
+            "id": LESSON_DB_ID,
+            "position": 1,
+            "title": "Урок 1. Практика",
+            "entityInfo": {"id": LESSON_ENTITY_ID, "title": "Практика"},
+            "type": "lesson",
+        },
+        {
+            "id": LESSON2_DB_ID,
+            "position": 2,
+            "title": "Урок 2. Только теория",
+            "entityInfo": {"id": LESSON2_ENTITY_ID, "title": "Теория"},
+            "type": "lesson",
+        },
+    ],
+    "meta": {"current_page": 1, "last_page": 1},
+}
+LESSON_STRUCTURES = {
+    LESSON_DB_ID: {
+        "data": {
+            "id": LESSON_DB_ID,
+            "children": [
+                {"type": "curriculum_theory_block", "entityInfo": {"id": 11, "title": "Теория"}},
+                {
+                    "type": "curriculum_practice_block",
+                    "entityInfo": {"id": SUBJECT_ID, "title": "Практика"},
+                },
+                {"type": "curriculum_test_block", "entityInfo": {"id": 12, "title": "Квиз"}},
+            ],
+        }
+    },
+    LESSON2_DB_ID: {
+        "data": {
+            "id": LESSON2_DB_ID,
+            "children": [
+                {"type": "curriculum_theory_block", "entityInfo": {"id": 13, "title": "Лекция"}},
+            ],
+        }
+    },
+}
+
 
 def _test(test_id: int, ttype: str, title: str, answers: list[dict[str, Any]]) -> dict[str, Any]:
     return {
@@ -91,6 +142,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": "boom"})
             return
         path = self.path.split("?")[0]
+        if path == f"/api/v3/student/education-groups/{COURSE_ID}":
+            self._send(200, LESSONS_PAYLOAD)
+            return
+        if path.startswith(f"/api/v3/student/education-groups/{COURSE_ID}/structures/"):
+            lesson_id = path.rsplit("/", 1)[-1]
+            structure = LESSON_STRUCTURES.get(int(lesson_id)) if lesson_id.isdigit() else None
+            if structure is not None:
+                self._send(200, structure)
+            else:
+                self._send(404, {"error": "unknown lesson"})
+            return
         if path == f"/api/v1/content/practice/curriculumsubject/{SUBJECT_ID}":
             self._send(200, {
                 "id": SUBJECT_ID,

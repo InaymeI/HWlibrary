@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "maximumtest-desktop"
 APP_TITLE = "MaximumTest Library"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 ORG_NAME = "maximumtest-desktop"
 
 # ``MT_*`` overrides are handy for development (demo databases, staging hosts).
@@ -25,9 +25,20 @@ ENDPOINTS = {
         "/knowledgebase/{kbs_id}/{mode}/tests"
     ),
     "post_answer": "/api/v1/content/practice/curriculumsubject/{subject_id}/tests/{test_id}",
+    # v3 API: a course ("education group") expands into lessons; each lesson
+    # structure lists its practice blocks, whose entityInfo.id is the subject.
+    "education_group": "/api/v3/student/education-groups/{course_id}",
+    "lesson_structure": (
+        "/api/v3/student/education-groups/{course_id}/structures/{lesson_id}"
+    ),
     # Undocumented, used only for an optional "what can I open?" probe.
     "courses": "/api/v1/content/courses",
 }
+
+#: Pages requested for a course; the backend paginates lessons.
+COURSE_PAGE_SIZE = 50
+#: Safety limit for course pagination (a course never has 500 lessons).
+COURSE_MAX_PAGES = 10
 
 MODES = ("online", "offline", "aftertheory")
 #: Types the application can render and answer.

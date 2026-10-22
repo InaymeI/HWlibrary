@@ -1,8 +1,16 @@
-"""Background synchronisation of subjects and their tests.
+"""Background synchronisation of courses, subjects and their tests.
 
 The worker is a :class:`QThread` so the UI stays responsive.  All database
 writes happen in this thread (``sqlite3`` connections are per-thread) and are
 batched: one transaction per knowledge base.
+
+Two entry points share one queue:
+
+* a **course** (``/student/courses/<id>/lessons``) expands into lessons →
+  ``curriculum_practice_block`` children → subjects → knowledge bases → tests;
+* a **subject** is synchronised directly, as before.
+
+Both can be mixed in a single run; the UI shows one summary at the end.
 """
 
 from __future__ import annotations
@@ -11,11 +19,18 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from . import config, db
 from .api import Api, ApiError, AuthError
-from .models import extract_kbs_entries, extract_tests, subject_title
+from .models import (
+    extract_course_title,
+    extract_kbs_entries,
+    extract_lessons,
+    extract_practice_blocks,
+    extract_tests,
+    subject_title,
+)
 
 #: Keys a tests payload may wrap the array in.
 _ARRAY_KEYS = ("tests", "items", "data", "educationTests", "result")
@@ -46,19 +61,44 @@ def _dedupe_tests(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(unique.values())
 
 
+def _last_page(payload: Any) -> int | None:
+    """``meta.last_page`` from a paginated v3 response, when present."""
+    nodes = [payload]
+    if isinstance(payload, dict):
+        for key in ("meta", "data", "pagination"):
+            node = payload.get(key)
+            if isinstance(node, dict):
+                nodes.append(node)
+                meta = node.get("meta")
+                if isinstance(meta, dict):
+                    nodes.append(meta)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for key in ("last_page", "lastPage", "total_pages", "totalPages"):
+            value = node.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+    return None
+
+
 @dataclass
 class SyncResult:
-    subject_id: int
+    subject_id: int = 0
     kbs: int = 0
     tests: int = 0
     errors: int = 0
     cancelled: bool = False
     error: str | None = None
     seconds: float = 0.0
+    #: Only set for a course run.
+    course_id: int | None = None
+    lessons: int = 0
+    subjects: int = 0
 
 
 class SyncThread(QThread):
-    """Synchronise one subject (or several, one after another)."""
+    """Synchronise courses and/or subjects, one after another."""
 
     progress = pyqtSignal(int, int, str)   # done, total, message
     log = pyqtSignal(str)                  # human readable log line
@@ -66,10 +106,20 @@ class SyncThread(QThread):
     finished_all = pyqtSignal(list)        # list[SyncResult]
     failed = pyqtSignal(str, str)          # title, message
 
-    def __init__(self, api: Api, subject_ids: list[int], parent=None) -> None:
+    def __init__(
+        self,
+        api: Api,
+        subject_ids: list[int] | None = None,
+        course_ids: list[int] | None = None,
+        parent=None,
+    ) -> None:
+        if parent is None and isinstance(course_ids, QObject):
+            # Backwards compatibility: SyncThread(api, subject_ids, parent).
+            parent, course_ids = course_ids, None
         super().__init__(parent)
         self.api = api
-        self.subject_ids = list(subject_ids)
+        self.subject_ids = list(subject_ids or [])
+        self.course_ids = list(course_ids or [])
         self._stop = False
 
     # ------------------------------------------------------------------ #
@@ -80,27 +130,147 @@ class SyncThread(QThread):
     def stopping(self) -> bool:
         return self._stop
 
+    def _pause(self) -> None:
+        if config.SYNC_DELAY_MS:
+            self.msleep(int(config.SYNC_DELAY_MS))
+
     # ------------------------------------------------------------------ #
     def run(self) -> None:  # noqa: D401 - Qt entry point
         results: list[SyncResult] = []
-        for index, subject_id in enumerate(self.subject_ids):
+        queue: list[tuple[str, int]] = [("course", cid) for cid in self.course_ids]
+        queue += [("subject", sid) for sid in self.subject_ids]
+        for kind, ident in queue:
             if self._stop:
                 break
-            result = self._sync_subject(subject_id, index)
+            if kind == "course":
+                result = self._sync_course(ident)
+            else:
+                result = self._sync_subject(ident)
+                self.subject_done.emit(result)
             results.append(result)
-            self.subject_done.emit(result)
-            if result.error and isinstance(result.error, str) and result.error.startswith("auth"):
+            if result.error and str(result.error).startswith("auth"):
                 # Session expired: stop the whole queue instead of hammering.
                 break
         self.finished_all.emit(results)
 
     # ------------------------------------------------------------------ #
-    def _sync_subject(self, subject_id: int, index: int) -> SyncResult:
+    def _sync_course(self, course_id: int) -> SyncResult:
+        """Course → lessons → practice blocks → subjects → tests."""
+        started = time.monotonic()
+        result = SyncResult(course_id=course_id)
+        try:
+            self.log.emit(f"→ курс #{course_id}")
+            self.progress.emit(0, 1, f"курс #{course_id}")
+            payload, lessons = self._fetch_course(course_id)
+            title = extract_course_title(payload, f"Курс #{course_id}")
+            if not lessons:
+                # «Ошибки и пустые ответы НЕ кэшировать».
+                result.error = "сервер вернул курс без уроков"
+                self.log.emit("  пустой ответ — кэш курса не изменён")
+                return result
+            db.upsert_course(course_id, title, payload if isinstance(payload, dict) else {})
+            db.replace_course_lessons(course_id, [lesson.as_row() for lesson in lessons])
+            result.lessons = len(lessons)
+            self.log.emit(f"  «{title}» · уроков: {len(lessons)}")
+
+            subject_ids: list[int] = []
+            for position, lesson in enumerate(lessons):
+                if self._stop:
+                    result.cancelled = True
+                    self.log.emit("  остановлено пользователем")
+                    break
+                self.progress.emit(position, len(lessons) + 1, f"урок «{lesson.title}»")
+                try:
+                    structure = self.api.get_lesson_structure(course_id, lesson.id)
+                    blocks = extract_practice_blocks(structure)
+                    db.set_lesson_subjects(lesson.id, [block.as_row() for block in blocks])
+                    for block in blocks:
+                        if block.subject_id not in subject_ids:
+                            subject_ids.append(block.subject_id)
+                    self.log.emit(f"  ▸ {lesson.title}: предметов {len(blocks)}")
+                except AuthError:
+                    raise
+                except ApiError as exc:
+                    result.errors += 1
+                    self.log.emit(f"  ✗ урок «{lesson.title}»: {exc}")
+                except Exception as exc:  # noqa: BLE001 - never kill the whole sync
+                    result.errors += 1
+                    self.log.emit(f"  ✗ урок «{lesson.title}»: {type(exc).__name__}: {exc}")
+                self._pause()
+
+            if result.cancelled:
+                return result
+
+            total = len(lessons) + max(len(subject_ids), 1)
+            for position, subject_id in enumerate(subject_ids):
+                if self._stop:
+                    result.cancelled = True
+                    self.log.emit("  остановлено пользователем")
+                    break
+                self.progress.emit(
+                    len(lessons) + position, total, f"предмет #{subject_id}"
+                )
+                sub = self._sync_subject(subject_id, report_progress=False)
+                result.subjects += 1
+                result.kbs += sub.kbs
+                result.tests += sub.tests
+                result.errors += sub.errors
+                self.subject_done.emit(sub)
+                if sub.error:
+                    result.errors += 1
+                    if str(sub.error).startswith("auth"):
+                        result.error = sub.error
+                        break
+                self._pause()
+            self.progress.emit(total, total, "готово")
+        except AuthError as exc:
+            result.error = f"auth: {exc}"
+            self.failed.emit(exc.title, str(exc))
+        except ApiError as exc:
+            result.error = str(exc)
+            self.failed.emit(exc.title, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            result.error = f"{type(exc).__name__}: {exc}"
+            self.failed.emit("Ошибка синхронизации", result.error)
+        finally:
+            result.seconds = time.monotonic() - started
+            db.close()
+        return result
+
+    # ------------------------------------------------------------------ #
+    def _fetch_course(self, course_id: int) -> tuple[Any, list]:
+        """All lessons of a course, following pagination."""
+        first = self.api.get_education_group(course_id, page=1)
+        lessons = extract_lessons(first)
+        last_page = _last_page(first)
+        page = 1
+        while not self._stop:
+            if last_page is not None:
+                if page >= last_page:
+                    break
+            elif len(lessons) < config.COURSE_PAGE_SIZE:
+                break
+            if page >= config.COURSE_MAX_PAGES:
+                self.log.emit(f"  остановлено на странице {page} (лимит)")
+                break
+            page += 1
+            self._pause()
+            batch_payload = self.api.get_education_group(course_id, page=page)
+            batch = extract_lessons(batch_payload)
+            if not batch:
+                break
+            known = {lesson.id for lesson in lessons}
+            lessons.extend(lesson for lesson in batch if lesson.id not in known)
+        return first, lessons
+
+    # ------------------------------------------------------------------ #
+    def _sync_subject(self, subject_id: int, *, report_progress: bool = True) -> SyncResult:
         started = time.monotonic()
         result = SyncResult(subject_id=subject_id)
         try:
             self.log.emit(f"→ предмет #{subject_id}")
-            self.progress.emit(0, 1, f"предмет #{subject_id}")
+            if report_progress:
+                self.progress.emit(0, 1, f"предмет #{subject_id}")
             base = self.api.get_curriculum_subject(subject_id)
             title = subject_title(base, "")
             entries = [entry.as_row() for entry in extract_kbs_entries(base)]
@@ -122,7 +292,8 @@ class SyncThread(QThread):
                     self.log.emit("  остановлено пользователем")
                     break
                 kid = int(kbs["id"])
-                self.progress.emit(position, total, f"раздел #{kid}")
+                if report_progress:
+                    self.progress.emit(position, total, f"раздел #{kid}")
                 try:
                     count = self._sync_kbs(subject_id, kbs)
                     seen_ids.append(kid)
@@ -137,15 +308,16 @@ class SyncThread(QThread):
                 except Exception as exc:  # noqa: BLE001 - never kill the whole sync
                     result.errors += 1
                     self.log.emit(f"  ✗ раздел #{kid}: {type(exc).__name__}: {exc}")
-                self.progress.emit(position + 1, total, f"раздел #{kid}")
-                if config.SYNC_DELAY_MS:
-                    self.msleep(config.SYNC_DELAY_MS)
+                if report_progress:
+                    self.progress.emit(position + 1, total, f"раздел #{kid}")
+                self._pause()
 
             if not result.cancelled and seen_ids:
                 removed = db.prune_kbs(subject_id, seen_ids)
                 if removed:
                     self.log.emit(f"  удалено устаревших разделов: {removed}")
-            self.progress.emit(total, total, "готово")
+            if report_progress:
+                self.progress.emit(total, total, "готово")
         except AuthError as exc:
             result.error = f"auth: {exc}"
             self.failed.emit(exc.title, str(exc))

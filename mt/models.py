@@ -445,6 +445,185 @@ def subject_title(payload: dict[str, Any] | None, fallback: str) -> str:
     return fallback
 
 
+# --------------------------------------------------------------------------- #
+# courses, lessons and practice blocks (v3 API)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LessonEntry:
+    """One lesson of a course.
+
+    ``id`` is the database lesson id used by the v3 endpoints; ``entity_id`` is
+    the "entity lesson id" from the site URL — exactly the value the answer
+    endpoint expects in ``lessonId``.
+    """
+
+    id: int
+    entity_id: int | None
+    title: str
+    position: int
+
+    @property
+    def subtitle(self) -> str:
+        if self.entity_id and self.entity_id != self.id:
+            return f"урок #{self.id} · entity {self.entity_id}"
+        return f"урок #{self.id}"
+
+    def as_row(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "entity_id": self.entity_id,
+            "title": self.title,
+            "position": self.position,
+        }
+
+
+@dataclass(frozen=True)
+class PracticeBlock:
+    """A ``curriculum_practice_block`` child of a lesson structure."""
+
+    subject_id: int
+    title: str
+    position: int
+
+    def as_row(self) -> dict[str, Any]:
+        return {
+            "subject_id": self.subject_id,
+            "title": self.title,
+            "position": self.position,
+        }
+
+
+def _payload_list(payload: Any) -> list[Any]:
+    """Unwrap ``{"data": [...]}`` and friends into a plain list."""
+    node: Any = payload
+    for _ in range(5):
+        if isinstance(node, list):
+            return node
+        if not isinstance(node, dict):
+            return []
+        for key in ("data", "items", "lessons", "results", "rows", "response"):
+            value = node.get(key)
+            if isinstance(value, (list, dict)):
+                node = value
+                break
+        else:
+            return []
+    return node if isinstance(node, list) else []
+
+
+def extract_lessons(payload: Any) -> list[LessonEntry]:
+    """Read lessons from ``GET /api/v3/student/education-groups/{id}``.
+
+    The lesson's own ``id`` addresses the structure endpoint, while
+    ``entityInfo.id`` is the entity lesson id used as ``lessonId`` in answers.
+    """
+    lessons: list[LessonEntry] = []
+    seen: set[int] = set()
+    for index, item in enumerate(_payload_list(payload)):
+        if not isinstance(item, dict):
+            continue
+        entity = item.get("entityInfo") or item.get("entity_info") or {}
+        if not isinstance(entity, dict):
+            entity = {}
+        lesson_id = _as_int(item.get("id"))
+        entity_id = _as_int(
+            entity.get("id")
+            or item.get("entityId")
+            or item.get("entity_id")
+            or item.get("entityLessonId")
+        )
+        if lesson_id is None:
+            lesson_id = entity_id
+        if lesson_id is None or lesson_id in seen:
+            continue
+        seen.add(lesson_id)
+        title = strip_html(
+            item.get("title")
+            or item.get("name")
+            or entity.get("title")
+            or entity.get("name")
+            or ""
+        )
+        position = _as_int(item.get("position") or item.get("sort") or item.get("order"))
+        lessons.append(
+            LessonEntry(
+                id=lesson_id,
+                entity_id=entity_id,
+                title=title or f"Урок #{entity_id or lesson_id}",
+                position=index if position is None else position,
+            )
+        )
+    return lessons
+
+
+def _practice_blocks_in(node: Any, out: list[PracticeBlock], depth: int = 0) -> None:
+    if depth > 8:
+        return
+    if isinstance(node, list):
+        for item in node:
+            _practice_blocks_in(item, out, depth + 1)
+        return
+    if not isinstance(node, dict):
+        return
+    entity = node.get("entityInfo") or node.get("entity_info") or {}
+    if not isinstance(entity, dict):
+        entity = {}
+    kind = str(node.get("type") or node.get("blockType") or entity.get("type") or "")
+    subject_id = _as_int(
+        entity.get("id")
+        or node.get("entityId")
+        or node.get("entity_id")
+        or (node.get("id") if "practice" in kind else None)
+    )
+    is_practice = kind in ("curriculum_practice_block", "practice_block", "curriculum_practice")
+    if is_practice and subject_id is not None:
+        title = strip_html(
+            entity.get("title")
+            or entity.get("name")
+            or node.get("title")
+            or node.get("name")
+            or ""
+        )
+        position = _as_int(node.get("position") or node.get("sort") or node.get("order"))
+        out.append(
+            PracticeBlock(
+                subject_id=subject_id,
+                title=title or f"Практика #{subject_id}",
+                position=len(out) if position is None else position,
+            )
+        )
+    for key in ("children", "items", "blocks", "structure", "data", "elements"):
+        value = node.get(key)
+        if isinstance(value, (list, dict)):
+            _practice_blocks_in(value, out, depth + 1)
+
+
+def extract_practice_blocks(payload: Any) -> list[PracticeBlock]:
+    """Collect practice blocks (subjects) from a lesson structure payload."""
+    found: list[PracticeBlock] = []
+    _practice_blocks_in(payload, found)
+    unique: dict[int, PracticeBlock] = {}
+    for block in found:
+        unique.setdefault(block.subject_id, block)
+    return list(unique.values())
+
+
+def extract_course_title(payload: Any, fallback: str) -> str:
+    """Best-effort course name; the API may omit it entirely."""
+    if isinstance(payload, dict):
+        for key in ("title", "name", "caption", "courseName"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return strip_html(value) or fallback
+        for key in ("course", "group", "educationGroup", "meta", "data"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                title = extract_course_title(value, "")
+                if title:
+                    return title
+    return fallback
+
+
 def test_title(row: dict[str, Any]) -> str:
     return str(row.get("title") or f"Тест #{row.get('id')}")
 

@@ -245,8 +245,17 @@ class DashboardPage(ScrollPage):
         cards.setSpacing(12)
         has_data = stats["subjects"] > 0
         palette = self.main.theme_palette()
+        first_card = (
+            ("предметов в кэше", fmt_int(stats["subjects"]), "book")
+            if not stats.get("courses")
+            else (
+                "курсов / предметов",
+                f"{fmt_int(stats['courses'])} / {fmt_int(stats['subjects'])}",
+                "book",
+            )
+        )
         for caption, value, icon_name in (
-            ("предметов в кэше", fmt_int(stats["subjects"]), "book"),
+            first_card,
             ("тестов", fmt_int(stats["total"]), "layers"),
             ("с готовым ответом", fmt_int(stats["supported"]), "check"),
             ("последнее обновление", relative_time(stats["updated_at"]), "clock"),
@@ -285,8 +294,10 @@ class DashboardPage(ScrollPage):
         steps = [
             ("1", "Импортируйте cookies", "Войдите на сайт, скопируйте Cookie из DevTools и вставьте его сюда.",
              primary_button("Импорт cookies", "cookie"), self.main.import_cookies),
-            ("2", "Добавьте предмет", "Вставьте ссылку вида /subjects/1234/ или просто ID предмета.",
-             secondary_button("Добавить предмет", "plus"), self.main.add_subject_dialog),
+            ("2", "Добавьте курс или предмет",
+             "Вставьте ссылку /student/courses/111137/lessons — загрузятся все уроки, "
+             "практики и задания.",
+             secondary_button("Добавить из ссылки", "plus"), self.main.add_link_dialog),
             ("3", "Синхронизируйте", "Задания загрузятся в локальный кэш и станут доступны офлайн.",
              secondary_button("Синхронизировать всё", "refresh"), self.main.sync_all),
         ]
@@ -324,8 +335,8 @@ class DashboardPage(ScrollPage):
         sync_button = primary_button("Синхронизировать всё", "refresh")
         sync_button.clicked.connect(self.main.sync_all)
         row.addWidget(sync_button)
-        add_button = secondary_button("Добавить предмет", "plus")
-        add_button.clicked.connect(self.main.add_subject_dialog)
+        add_button = secondary_button("Добавить курс", "plus")
+        add_button.clicked.connect(self.main.add_link_dialog)
         row.addWidget(add_button)
         all_button = secondary_button("Все тесты", "grid")
         all_button.clicked.connect(lambda: self.navigate.emit("all"))
@@ -334,6 +345,36 @@ class DashboardPage(ScrollPage):
         self.body.addLayout(row)
 
     def _build_recent(self, stats: dict[str, int]) -> None:
+        courses = db.list_courses()
+        if courses:
+            self.body.addWidget(SectionTitle("Курсы", len(courses)))
+            for course in courses[:4]:
+                row = ListRow(
+                    course["title"] or f"Курс #{course['id']}",
+                    " · ".join((
+                        f"{course['lesson_count']} "
+                        f"{plural(course['lesson_count'], 'урок', 'урока', 'уроков')}",
+                        f"{course['subject_count']} "
+                        f"{plural(course['subject_count'], 'предмет', 'предмета', 'предметов')}",
+                        f"{fmt_int(course['total'])} "
+                        f"{plural(course['total'], 'тест', 'теста', 'тестов')}",
+                    )),
+                    badges=[(f"{fmt_int(course['supported'])} с ответом",
+                             "success" if course["supported"] else "muted")],
+                    trailing=f"{course['supported']}/{course['total']}",
+                    icon_name="book",
+                )
+                row.clicked.connect(
+                    lambda _checked=False, cid=course["id"]: self.navigate.emit(f"course:{cid}")
+                )
+                self.body.addWidget(row)
+            if len(courses) > 4:
+                more_courses = ghost_button(
+                    f"Ещё {len(courses) - 4} — открыть курсы", "layers"
+                )
+                more_courses.clicked.connect(lambda: self.navigate.emit("courses"))
+                self.body.addWidget(more_courses, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.body.addWidget(SectionTitle("Предметы", stats["subjects"]))
         subjects = sorted(
             db.list_subjects(),
@@ -357,6 +398,287 @@ class DashboardPage(ScrollPage):
             more = ghost_button(f"Ещё {len(subjects) - 6} — открыть все тесты", "grid")
             more.clicked.connect(lambda: self.navigate.emit("all"))
             self.body.addWidget(more, 0, Qt.AlignmentFlag.AlignLeft)
+        self.body.addStretch(1)
+
+
+def _nested(widget: QWidget, indent: int = 30) -> QWidget:
+    """Indent a row so it visually belongs to the item above it."""
+    wrapper = QWidget()
+    layout = QVBoxLayout(wrapper)
+    layout.setContentsMargins(indent, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(widget)
+    return wrapper
+
+
+class CoursesPage(ScrollPage):
+    """All courses added from ``/student/courses/<id>/lessons`` links."""
+
+    def __init__(self, main) -> None:
+        super().__init__(main)
+        self.navigate.connect(main.navigate)
+        self.refresh()
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        clear_layout(self.body)
+        self.header.set_content(
+            "Курсы",
+            "Уроки, практики и задания, загруженные из ссылки на курс.",
+            breadcrumb=[("Библиотека", "dash"), ("Курсы", None)],
+        )
+        add_button = primary_button("Добавить из ссылки", "plus")
+        add_button.clicked.connect(self.main.add_link_dialog)
+        row = QHBoxLayout()
+        row.addWidget(add_button)
+        row.addStretch(1)
+        self.body.addLayout(row)
+
+        courses = db.list_courses()
+        if not courses:
+            empty_add = primary_button("Добавить курс", "plus")
+            empty_add.clicked.connect(self.main.add_link_dialog)
+            self.body.addWidget(EmptyState(
+                "book",
+                "Курсы ещё не добавлены",
+                "Скопируйте адрес страницы курса, например "
+                "https://education.maximumtest.ru/student/courses/111137/lessons, "
+                "и вставьте его в поле «Добавить из ссылки». Приложение загрузит уроки, "
+                "практики и все задания.",
+                [empty_add],
+            ))
+            self.body.addStretch(1)
+            return
+
+        self.body.addWidget(SectionTitle("Курсы", len(courses)))
+        for course in courses:
+            lessons = course.get("lesson_count") or 0
+            subjects = course.get("subject_count") or 0
+            total = course.get("total") or 0
+            supported = course.get("supported") or 0
+            subtitle = " · ".join((
+                f"ID {course['id']}",
+                f"{fmt_int(lessons)} {plural(lessons, 'урок', 'урока', 'уроков')}",
+                f"{fmt_int(subjects)} {plural(subjects, 'предмет', 'предмета', 'предметов')}",
+                f"обновлено {relative_time(course.get('fetched_at'))}",
+            ))
+            row = ListRow(
+                course["title"] or f"Курс #{course['id']}",
+                subtitle,
+                badges=[
+                    (f"{fmt_int(total)} {plural(total, 'тест', 'теста', 'тестов')}", "muted"),
+                    (f"{fmt_int(supported)} с ответом", "success" if supported else "muted"),
+                ],
+                trailing=f"{supported}/{total}",
+                icon_name="book",
+            )
+            row.clicked.connect(
+                lambda _checked=False, cid=course["id"]: self.navigate.emit(f"course:{cid}")
+            )
+            self.body.addWidget(row)
+        self.body.addStretch(1)
+
+
+class CoursePage(ScrollPage):
+    """Course → lessons → practice blocks (subjects)."""
+
+    def __init__(self, main) -> None:
+        super().__init__(main)
+        self.navigate.connect(main.navigate)
+        self.course_id: int | None = None
+
+    def show_course(self, course_id: int) -> None:
+        self.course_id = course_id
+        self.refresh()
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        if self.course_id is None:
+            return
+        course = db.get_course(self.course_id)
+        clear_layout(self.body)
+        if not course:
+            self.header.set_content(
+                "Курс не найден", "", [("Библиотека", "dash"), ("Курсы", "courses")]
+            )
+            add_button = primary_button("Добавить курс", "plus")
+            add_button.clicked.connect(self.main.add_link_dialog)
+            self.body.addWidget(EmptyState(
+                "alert", "Курс удалён из кэша",
+                "Добавьте ссылку на курс снова, чтобы загрузить его уроки.",
+                [add_button],
+            ))
+            self.body.addStretch(1)
+            return
+
+        stats = db.course_stats(self.course_id)
+        lessons = db.course_lessons(self.course_id)
+        title = course["title"] or f"Курс #{self.course_id}"
+        sync_button = primary_button("Синхронизировать курс", "refresh")
+        sync_button.clicked.connect(lambda: self.main.sync_course(self.course_id))
+        delete_button = ghost_button("Удалить курс из кэша", "trash", color_key="danger")
+        delete_button.clicked.connect(lambda: self.main.delete_course(self.course_id))
+        self.header.set_content(
+            title,
+            " · ".join((
+                f"ID {self.course_id}",
+                f"{fmt_int(stats['lessons'])} {plural(stats['lessons'], 'урок', 'урока', 'уроков')}",
+                f"{fmt_int(stats['subjects'])} "
+                f"{plural(stats['subjects'], 'предмет', 'предмета', 'предметов')}",
+                f"{fmt_int(stats['total'])} {plural(stats['total'], 'тест', 'теста', 'тестов')}",
+                f"обновлено {relative_time(course.get('fetched_at'))}",
+            )),
+            breadcrumb=[("Библиотека", "dash"), ("Курсы", "courses"), (title, None)],
+            badges=[
+                (f"{fmt_int(stats['supported'])} с ответом",
+                 "success" if stats["supported"] else "muted"),
+            ],
+            actions=[sync_button, delete_button],
+        )
+
+        if not lessons:
+            load_button = primary_button("Загрузить уроки", "refresh")
+            load_button.clicked.connect(lambda: self.main.sync_course(self.course_id))
+            self.body.addWidget(EmptyState(
+                "layers",
+                "Уроки ещё не загружены",
+                "Синхронизируйте курс: приложение прочитает его структуру и скачает задания.",
+                [load_button],
+            ))
+            self.body.addStretch(1)
+            return
+
+        self.body.addWidget(SectionTitle("Уроки", len(lessons)))
+        for position, (lesson, subjects) in enumerate(lessons, start=1):
+            subject_tests = sum(subject["total"] for subject in subjects)
+            lesson_title = lesson["title"] or f"Урок #{lesson['id']}"
+            row = ListRow(
+                f"{position}. {lesson_title}",
+                " · ".join((
+                    lesson.get("entity_lesson_id")
+                    and f"lessonId {lesson['entity_lesson_id']}" or f"урок #{lesson['id']}",
+                    f"{len(subjects)} {plural(len(subjects), 'предмет', 'предмета', 'предметов')}",
+                    f"{fmt_int(subject_tests)} {plural(subject_tests, 'тест', 'теста', 'тестов')}",
+                )),
+                badges=[] if subjects else [("только теория", "muted")],
+                trailing=f"{len(subjects)}" if subjects else "",
+                icon_name="layers",
+            )
+            row.clicked.connect(
+                lambda _checked=False, lid=lesson["id"]: self.navigate.emit(f"lesson:{lid}")
+            )
+            self.body.addWidget(row)
+            for subject in subjects:
+                subject_row = ListRow(
+                    subject["title"] or f"Предмет #{subject['id']}",
+                    f"предмет #{subject['id']}",
+                    badges=[
+                        (f"{fmt_int(subject['total'])} "
+                         f"{plural(subject['total'], 'тест', 'теста', 'тестов')}",
+                         "muted" if subject["total"] else "warning"),
+                        (f"{fmt_int(subject['supported'])} с ответом",
+                         "success" if subject["supported"] else "muted"),
+                    ],
+                    trailing=f"{subject['supported']}/{subject['total']}",
+                    icon_name="grid",
+                )
+                subject_row.clicked.connect(
+                    lambda _checked=False, sid=subject["id"]: self.navigate.emit(f"subject:{sid}")
+                )
+                self.body.addWidget(_nested(subject_row))
+        self.body.addStretch(1)
+
+
+class LessonPage(ScrollPage):
+    """One lesson and its practice blocks."""
+
+    def __init__(self, main) -> None:
+        super().__init__(main)
+        self.navigate.connect(main.navigate)
+        self.lesson_id: int | None = None
+
+    def show_lesson(self, lesson_id: int) -> None:
+        self.lesson_id = lesson_id
+        self.refresh()
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        if self.lesson_id is None:
+            return
+        lesson = db.get_lesson(self.lesson_id)
+        clear_layout(self.body)
+        if not lesson:
+            self.header.set_content(
+                "Урок не найден", "", [("Библиотека", "dash"), ("Курсы", "courses")]
+            )
+            self.body.addWidget(EmptyState(
+                "alert", "Урок отсутствует в кэше",
+                "Синхронизируйте курс, чтобы построить структуру уроков.",
+            ))
+            self.body.addStretch(1)
+            return
+
+        course = db.get_course(lesson["course_id"]) or {}
+        subjects = db.lesson_subjects(self.lesson_id)
+        title = lesson["title"] or f"Урок #{self.lesson_id}"
+        sync_button = primary_button("Синхронизировать урок", "refresh")
+        sync_button.clicked.connect(lambda: self.main.sync_lesson(self.lesson_id))
+        open_course = secondary_button("К курсу", "book")
+        open_course.clicked.connect(
+            lambda: self.navigate.emit(f"course:{lesson['course_id']}")
+        )
+        self.header.set_content(
+            title,
+            " · ".join(bit for bit in (
+                f"урок #{self.lesson_id}",
+                lesson.get("entity_lesson_id") and f"lessonId {lesson['entity_lesson_id']}",
+                f"{len(subjects)} {plural(len(subjects), 'предмет', 'предмета', 'предметов')}",
+            ) if bit),
+            breadcrumb=[
+                ("Библиотека", "dash"),
+                ("Курсы", "courses"),
+                (course.get("title") or f"Курс #{lesson['course_id']}",
+                 f"course:{lesson['course_id']}"),
+                (title, None),
+            ],
+            actions=[sync_button, open_course],
+        )
+
+        if not subjects:
+            self.body.addWidget(EmptyState(
+                "layers",
+                "В уроке нет практик",
+                "Этот урок содержит только теорию — заданий для загрузки нет.",
+                [secondary_button("Открыть курс", "book")],
+            ))
+            self.body.addStretch(1)
+            return
+
+        self.body.addWidget(SectionTitle("Практики", len(subjects)))
+        for subject in subjects:
+            row = ListRow(
+                subject["title"] or f"Предмет #{subject['id']}",
+                f"предмет #{subject['id']}",
+                badges=[
+                    (f"{fmt_int(subject['total'])} "
+                     f"{plural(subject['total'], 'тест', 'теста', 'тестов')}",
+                     "muted" if subject["total"] else "warning"),
+                    (f"{fmt_int(subject['supported'])} с ответом",
+                     "success" if subject["supported"] else "muted"),
+                ],
+                trailing=f"{subject['supported']}/{subject['total']}",
+                icon_name="grid",
+            )
+            row.clicked.connect(
+                lambda _checked=False, sid=subject["id"]: self.navigate.emit(f"subject:{sid}")
+            )
+            self.body.addWidget(row)
         self.body.addStretch(1)
 
 
@@ -385,6 +707,19 @@ class SubjectPage(ScrollPage):
             return
         counts = db.subject_stats(self.subject_id)
         title = subject["title"] or f"Предмет #{self.subject_id}"
+        path = db.subject_course_path(self.subject_id)
+        breadcrumb: list[tuple[str, str | None]] = [("Библиотека", "dash")]
+        if path:
+            breadcrumb.append(("Курсы", "courses"))
+            breadcrumb.append(
+                (path.get("course_title") or f"Курс #{path['course_id']}",
+                 f"course:{path['course_id']}")
+            )
+            breadcrumb.append(
+                (path.get("lesson_title") or f"Урок #{path['lesson_id']}",
+                 f"lesson:{path['lesson_id']}")
+            )
+        breadcrumb.append((title, None))
 
         sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_subject(self.subject_id))
@@ -399,7 +734,7 @@ class SubjectPage(ScrollPage):
             f"{fmt_int(counts['kbs'])} {plural(counts['kbs'], 'раздел', 'раздела', 'разделов')} · "
             f"{fmt_int(counts['total'])} {plural(counts['total'], 'тест', 'теста', 'тестов')} · "
             f"обновлено {relative_time(subject.get('fetched_at'))}",
-            breadcrumb=[("Библиотека", "dash"), (title, None)],
+            breadcrumb=breadcrumb,
             badges=[
                 (f"{fmt_int(counts['supported'])} с ответом", "success" if counts["supported"] else "muted"),
             ],
@@ -874,8 +1209,9 @@ class TestPage(ScrollPage):
         layout.addLayout(buttons)
 
         warning = label(
-            "Отправка ответа изменит результат в личном кабинете. Lesson ID берётся из данных "
-            "задания; проверьте его перед отправкой.",
+            "Отправка ответа изменит результат в личном кабинете. lessonId — это "
+            "id урока из ссылки на задание (entity lesson id), он подставляется из "
+            "структуры курса; проверьте значение перед отправкой.",
             "muted", wrap=True,
         )
         layout.addWidget(warning)
@@ -886,11 +1222,22 @@ class TestPage(ScrollPage):
         send_row.addWidget(lesson_caption)
         self.lesson_input = QSpinBox()
         self.lesson_input.setRange(0, 2_147_483_647)
-        # lessonId comes from the tree; when it is missing the reference
-        # suggests the practice URL (/lesson/<id>/subjects/<id>/practice/kbs/…)
-        fallback_lesson = (self.kbs or {}).get("lesson_id") or 0
+        # The answer endpoint expects the *entity* lesson id — the one in
+        # /lesson/<id>/subjects/… and in the course structure.  The curriculum
+        # tree numbers lessons differently, so it is only the last resort.
+        entity_lesson = db.lesson_id_for_subject(row.get("subject_id"))
         hint = self.main.lesson_hint(row.get("subject_id"))
-        self.lesson_input.setValue(details.lesson_id or fallback_lesson or hint or 0)
+        tree_lesson = (self.kbs or {}).get("lesson_id") or 0
+        self.lesson_input.setValue(
+            entity_lesson or hint or details.lesson_id or tree_lesson or 0
+        )
+        self.lesson_input.setToolTip(
+            "Из структуры курса" if entity_lesson
+            else "Из ссылки на задание" if hint
+            else "Из данных задания" if details.lesson_id
+            else "Из дерева предмета" if tree_lesson
+            else "Не найден — укажите вручную"
+        )
         self.lesson_input.setMinimumWidth(150)
         send_row.addWidget(self.lesson_input)
         send_row.addStretch(1)

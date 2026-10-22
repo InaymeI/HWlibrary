@@ -612,3 +612,205 @@ def test_empty_subject_payload_does_not_overwrite_cache(temp_db, monkeypatch):
 
     assert db.get_subject(SUBJECT_ID)["title"] == "Нормальное имя"
     assert results[0].error
+
+
+# --------------------------------------------------------------------------- #
+# course structure (v3 API)
+# --------------------------------------------------------------------------- #
+REFERENCE_LINK = (
+    "https://education.maximumtest.ru/lesson/4772366/subjects/51610/practice"
+    "/kbs/8931/tests/289165?backPage=/student/courses/111137/lessons&type=online"
+)
+
+
+def test_parse_reference_task_link():
+    from mt import links
+
+    parsed = links.parse_link(REFERENCE_LINK)
+    assert parsed is not None
+    assert parsed.kind == "test"
+    assert parsed.course_id == 111137
+    assert parsed.lesson_id == 4772366
+    assert parsed.subject_id == 51610
+    assert parsed.kbs_id == 8931
+    assert parsed.test_id == 289165
+    assert parsed.mode == "online"
+
+
+def test_parse_course_and_subject_links():
+    from mt import links
+
+    course = links.parse_link("https://education.maximumtest.ru/student/courses/111137/lessons")
+    assert course is not None
+    assert (course.kind, course.course_id) == ("course", 111137)
+
+    quoted = links.parse_link(
+        "https://education.maximumtest.ru/lesson/4772366/subjects/51610"
+        "?backPage=%2Fstudent%2Fcourses%2F111137%2Flessons"
+    )
+    assert quoted is not None
+    assert (quoted.kind, quoted.subject_id, quoted.lesson_id, quoted.course_id) == (
+        "subject", 51610, 4772366, 111137,
+    )
+
+    kbs = links.parse_link("https://education.maximumtest.ru/kbs/8931")
+    assert kbs is not None and kbs.kind == "kbs" and kbs.kbs_id == 8931
+    assert links.parse_link("") is None
+
+
+def test_extract_lessons_and_practice_blocks_from_v3_shapes():
+    lessons = models.extract_lessons({
+        "data": [
+            {"id": 41907128, "position": 3, "title": "Урок 1",
+             "entityInfo": {"id": 4772366, "title": "Практика"}},
+            {"id": 41907128, "entityInfo": {"id": 4772366}},  # duplicate
+            {"entityInfo": {"id": 4772367, "title": "Без id"}},
+            {"title": "мусор"},
+        ],
+        "meta": {"last_page": 1},
+    })
+    assert [lesson.id for lesson in lessons] == [41907128, 4772367]
+    assert lessons[0].entity_id == 4772366
+    assert lessons[0].position == 3
+    assert lessons[1].title == "Без id"
+
+    blocks = models.extract_practice_blocks({
+        "data": {
+            "children": [
+                {"type": "curriculum_theory_block", "entityInfo": {"id": 1}},
+                {"type": "curriculum_practice_block",
+                 "entityInfo": {"id": 51610, "title": "Практика"}},
+                {"type": "curriculum_practice_block", "entityInfo": {"id": 51610}},
+            ]
+        }
+    })
+    assert [block.subject_id for block in blocks] == [51610]
+    assert blocks[0].title == "Практика"
+    assert models.extract_practice_blocks(None) == []
+
+
+def test_course_sync_expands_lessons_and_subjects(temp_db, monkeypatch):
+    """One course link fills lessons, practice blocks and their tests."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import (
+        COURSE_ID,
+        COURSE_TITLE,
+        KBS_ONLINE,
+        LESSON2_DB_ID,
+        LESSON_DB_ID,
+        LESSON_ENTITY_ID,
+        SUBJECT_ID,
+        TESTS_OFFLINE,
+        TESTS_ONLINE,
+        FakeServer,
+    )
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-course.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        results: list = []
+        subjects: list = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.subject_done.connect(subjects.append, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+        # the documented endpoints were used
+        paths = [path.split("?")[0] for path in server.requests]
+        assert f"/api/v3/student/education-groups/{COURSE_ID}" in paths
+        assert (
+            f"/api/v3/student/education-groups/{COURSE_ID}/structures/{LESSON_DB_ID}" in paths
+        )
+        assert "/api/v1/content/practice/curriculumsubject/777" in paths
+
+    assert db.get_course(COURSE_ID)["title"] == COURSE_TITLE
+    lessons = db.course_lessons(COURSE_ID)
+    assert [lesson["id"] for lesson, _subjects in lessons] == [LESSON_DB_ID, LESSON2_DB_ID]
+    assert [subject["id"] for subject in lessons[0][1]] == [SUBJECT_ID]
+    assert lessons[1][1] == []  # a theory-only lesson has no practice block
+
+    # the answer endpoint needs the entity lesson id, not the database one
+    assert db.lesson_id_for_subject(SUBJECT_ID) == LESSON_ENTITY_ID
+    assert db.get_lesson(LESSON_DB_ID)["entity_lesson_id"] == LESSON_ENTITY_ID
+
+    assert db.kbs_stats(KBS_ONLINE)["total"] == len(TESTS_ONLINE)
+    assert len(results) == 1
+    result = results[0]
+    assert result.course_id == COURSE_ID
+    assert (result.lessons, result.subjects) == (2, 1)
+    total_tests = len(TESTS_ONLINE) + len(TESTS_OFFLINE)  # both modes of the subject
+    assert result.tests == total_tests
+    assert not result.error
+    assert [item.subject_id for item in subjects] == [SUBJECT_ID]
+
+    stats = db.course_stats(COURSE_ID)
+    assert stats["subjects"] == 1 and stats["total"] == total_tests
+
+
+def test_course_sync_skips_structure_errors(temp_db, monkeypatch):
+    """A broken lesson structure must not abort the rest of the course."""
+    from mt.api import Api, ApiError
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-course2.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_MS", 0)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        original = api.get_lesson_structure
+        calls = {"n": 0}
+
+        def flaky(course_id: int, lesson_id: int):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise ApiError("HTTP 500: boom", status=500)
+            return original(course_id, lesson_id)
+
+        monkeypatch.setattr(api, "get_lesson_structure", flaky)
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        results: list = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    assert results[0].errors == 1
+    assert results[0].subjects == 1  # lesson 1 still synced its practice block
+
+
+def test_database_upgrades_from_v2_to_course_schema(temp_db):
+    """An existing cache must gain course tables without losing data."""
+    import sqlite3
+
+    from mt import db as database
+
+    path = database.database_path()
+    database.set_database_path(path)
+    database.init()
+    database.upsert_subject(555, "Старый предмет", {"title": "Старый предмет"})
+    database.close()
+
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "DROP TABLE lesson_subjects; DROP TABLE lessons; DROP TABLE courses;"
+        "PRAGMA user_version = 2;"
+    )
+    conn.commit()
+    conn.close()
+
+    database.init()
+    assert database.get_subject(555)["title"] == "Старый предмет"
+    assert database.list_courses() == []
+    database.upsert_course(1, "Новый курс", {})
+    assert database.list_courses()[0]["title"] == "Новый курс"
+    with sqlite3.connect(path) as check:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 3

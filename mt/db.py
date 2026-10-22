@@ -23,7 +23,7 @@ from typing import Any
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS subjects (
@@ -52,10 +52,41 @@ CREATE TABLE IF NOT EXISTS tests (
     fetched_at   INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS courses (
+    id           INTEGER PRIMARY KEY,
+    title        TEXT    NOT NULL DEFAULT '',
+    payload_json TEXT    NOT NULL DEFAULT '{}',
+    fetched_at   INTEGER NOT NULL
+);
+
+--: A lesson belongs to a course; ``entity_lesson_id`` is the id used in URLs
+--: and in the ``lessonId`` field of an answer.
+CREATE TABLE IF NOT EXISTS lessons (
+    id               INTEGER NOT NULL,
+    course_id        INTEGER NOT NULL,
+    entity_lesson_id INTEGER,
+    title            TEXT    NOT NULL DEFAULT '',
+    position         INTEGER NOT NULL DEFAULT 0,
+    payload_json     TEXT    NOT NULL DEFAULT '{}',
+    fetched_at       INTEGER NOT NULL,
+    PRIMARY KEY (course_id, id)
+);
+
+--: ``curriculum_practice_block`` children of a lesson: subject + display data.
+CREATE TABLE IF NOT EXISTS lesson_subjects (
+    lesson_id  INTEGER NOT NULL,
+    subject_id INTEGER NOT NULL,
+    title      TEXT    NOT NULL DEFAULT '',
+    position   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (lesson_id, subject_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tests_kbs       ON tests(kbs_id);
 CREATE INDEX IF NOT EXISTS idx_tests_subject   ON tests(subject_id);
 CREATE INDEX IF NOT EXISTS idx_kbs_subject     ON knowledge_bases(subject_id);
 CREATE INDEX IF NOT EXISTS idx_tests_type      ON tests(type);
+CREATE INDEX IF NOT EXISTS idx_lessons_course  ON lessons(course_id);
+CREATE INDEX IF NOT EXISTS idx_lesson_subjects ON lesson_subjects(subject_id);
 """
 
 _local = threading.local()
@@ -283,6 +314,304 @@ def prune_kbs(sid: int, keep_ids: Sequence[int]) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# courses and lessons (v3 structure)
+# --------------------------------------------------------------------------- #
+def _supported_sum(column: str = "t.type") -> str:
+    return f"SUM(CASE WHEN {column} IN ({config.SUPPORTED_TYPES_SQL}) THEN 1 ELSE 0 END)"
+
+
+def upsert_course(cid: int, title: str, payload: dict[str, Any]) -> None:
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO courses(id, title, payload_json, fetched_at) VALUES(?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                title        = excluded.title,
+                payload_json = excluded.payload_json,
+                fetched_at   = excluded.fetched_at
+            """,
+            (cid, title or f"Курс #{cid}", json.dumps(payload, ensure_ascii=False), now()),
+        )
+
+
+def get_course(cid: int) -> dict[str, Any] | None:
+    row = get_connection().execute("SELECT * FROM courses WHERE id = ?", (cid,)).fetchone()
+    return dict(row) if row else None
+
+
+def _course_stat_rows() -> list[dict[str, Any]]:
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT c.*,
+            (SELECT COUNT(*) FROM lessons l WHERE l.course_id = c.id) AS lesson_count,
+            (SELECT COUNT(*) FROM (
+                SELECT DISTINCT ls.subject_id FROM lessons l
+                JOIN lesson_subjects ls ON ls.lesson_id = l.id
+                WHERE l.course_id = c.id)) AS subject_count
+        FROM courses c
+        ORDER BY c.title COLLATE NOCASE, c.id
+        """
+    ).fetchall()
+    totals: dict[int, tuple[int, int]] = {}
+    for row in conn.execute(
+        f"""
+        SELECT cs.course_id AS course_id, COUNT(t.id) AS total,
+               {_supported_sum()} AS supported
+        FROM (
+            SELECT DISTINCT l.course_id AS course_id, ls.subject_id AS subject_id
+            FROM lessons l JOIN lesson_subjects ls ON ls.lesson_id = l.id
+        ) cs
+        LEFT JOIN tests t ON t.subject_id = cs.subject_id
+        GROUP BY cs.course_id
+        """
+    ).fetchall():
+        totals[int(row["course_id"])] = (row["total"] or 0, row["supported"] or 0)
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["lesson_count"] = item.get("lesson_count") or 0
+        item["subject_count"] = item.get("subject_count") or 0
+        item["total"], item["supported"] = totals.get(int(item["id"]), (0, 0))
+        result.append(item)
+    return result
+
+
+def list_courses() -> list[dict[str, Any]]:
+    return _course_stat_rows()
+
+
+def course_stats(cid: int) -> dict[str, int]:
+    row = next((item for item in _course_stat_rows() if item["id"] == cid), None)
+    if row is None:
+        return {"lessons": 0, "subjects": 0, "total": 0, "supported": 0}
+    return {
+        "lessons": row["lesson_count"],
+        "subjects": row["subject_count"],
+        "total": row["total"],
+        "supported": row["supported"],
+    }
+
+
+def replace_course_lessons(course_id: int, lessons: Iterable[dict[str, Any]]) -> int:
+    """Store the lessons of a course; lessons missing from *lessons* vanish."""
+    stamp = now()
+    values = []
+    keep: set[int] = set()
+    for lesson in lessons:
+        lesson_id = int(lesson["id"])
+        keep.add(lesson_id)
+        values.append(
+            (
+                lesson_id,
+                course_id,
+                lesson.get("entity_id"),
+                str(lesson.get("title") or "")[:300],
+                int(lesson.get("position") or 0),
+                json.dumps(lesson.get("payload") or {}, ensure_ascii=False),
+                stamp,
+            )
+        )
+    with transaction() as conn:
+        existing = {
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM lessons WHERE course_id = ?", (course_id,)
+            ).fetchall()
+        }
+        for stale in existing - keep:
+            conn.execute("DELETE FROM lesson_subjects WHERE lesson_id = ?", (stale,))
+            conn.execute(
+                "DELETE FROM lessons WHERE course_id = ? AND id = ?", (course_id, stale)
+            )
+        if values:
+            conn.executemany(
+                """
+                INSERT INTO lessons(id, course_id, entity_lesson_id, title, position,
+                                    payload_json, fetched_at)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(course_id, id) DO UPDATE SET
+                    entity_lesson_id = excluded.entity_lesson_id,
+                    title            = excluded.title,
+                    position         = excluded.position,
+                    payload_json     = excluded.payload_json,
+                    fetched_at       = excluded.fetched_at
+                """,
+                values,
+            )
+    return len(values)
+
+
+def set_lesson_subjects(lesson_id: int, subjects: Iterable[dict[str, Any]]) -> None:
+    values = [
+        (
+            int(subject["subject_id"]),
+            lesson_id,
+            str(subject.get("title") or "")[:300],
+            int(subject.get("position") or 0),
+        )
+        for subject in subjects
+    ]
+    with transaction() as conn:
+        conn.execute("DELETE FROM lesson_subjects WHERE lesson_id = ?", (lesson_id,))
+        if values:
+            conn.executemany(
+                "INSERT OR REPLACE INTO lesson_subjects"
+                "(subject_id, lesson_id, title, position) VALUES(?,?,?,?)",
+                values,
+            )
+
+
+def get_lesson(lesson_id: int) -> dict[str, Any] | None:
+    row = get_connection().execute(
+        "SELECT * FROM lessons WHERE id = ? ORDER BY course_id LIMIT 1", (lesson_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def lesson_subject_ids(lesson_id: int) -> list[int]:
+    rows = get_connection().execute(
+        "SELECT subject_id FROM lesson_subjects WHERE lesson_id = ?"
+        " ORDER BY position, subject_id",
+        (lesson_id,),
+    ).fetchall()
+    return [int(row["subject_id"]) for row in rows]
+
+
+def lesson_subjects(lesson_id: int) -> list[dict[str, Any]]:
+    """Subjects of a lesson with test counters."""
+    sql = f"""
+        SELECT ls.subject_id AS id, ls.title AS lesson_title, ls.position,
+               s.title AS subject_title,
+               COUNT(t.id) AS total,
+               {_supported_sum()} AS supported
+        FROM lesson_subjects ls
+        LEFT JOIN subjects s ON s.id = ls.subject_id
+        LEFT JOIN tests t ON t.subject_id = ls.subject_id
+        WHERE ls.lesson_id = ?
+        GROUP BY ls.subject_id
+        ORDER BY ls.position, ls.subject_id
+    """
+    rows = []
+    for row in get_connection().execute(sql, (lesson_id,)).fetchall():
+        item = dict(row)
+        item["title"] = item.pop("subject_title") or item.pop("lesson_title") or f"Предмет #{item['id']}"
+        item["total"] = item.get("total") or 0
+        item["supported"] = item.get("supported") or 0
+        rows.append(item)
+    return rows
+
+
+def subject_course_path(subject_id: int) -> dict[str, Any] | None:
+    """Course and lesson a subject belongs to (for breadcrumbs)."""
+    row = get_connection().execute(
+        """
+        SELECT l.id AS lesson_id, l.title AS lesson_title,
+               c.id AS course_id, c.title AS course_title
+        FROM lesson_subjects ls
+        JOIN lessons l ON l.id = ls.lesson_id
+        JOIN courses c ON c.id = l.course_id
+        WHERE ls.subject_id = ?
+        ORDER BY l.position, l.id LIMIT 1
+        """,
+        (subject_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def course_subject_ids() -> set[int]:
+    """Subjects that are reachable through a course (and thus synced with it)."""
+    rows = get_connection().execute(
+        "SELECT DISTINCT subject_id FROM lesson_subjects"
+    ).fetchall()
+    return {int(row["subject_id"]) for row in rows}
+
+
+def lesson_id_for_subject(subject_id: int) -> int | None:
+    """Entity lesson id of the first course lesson that contains *subject_id*.
+
+    This is the value the answer endpoint expects, so it precedes any guess
+    made from the curriculum tree or a pasted link.
+    """
+    row = get_connection().execute(
+        """
+        SELECT l.entity_lesson_id AS entity_id
+        FROM lesson_subjects ls JOIN lessons l ON l.id = ls.lesson_id
+        WHERE ls.subject_id = ? AND l.entity_lesson_id IS NOT NULL
+        ORDER BY l.course_id, l.position, l.id LIMIT 1
+        """,
+        (subject_id,),
+    ).fetchone()
+    return int(row["entity_id"]) if row and row["entity_id"] else None
+
+
+def course_lessons(course_id: int) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    """Lessons of a course in display order, each with its subjects."""
+    lessons = [
+        dict(row)
+        for row in get_connection().execute(
+            "SELECT * FROM lessons WHERE course_id = ? ORDER BY position, id",
+            (course_id,),
+        ).fetchall()
+    ]
+    if not lessons:
+        return []
+    marks = ",".join("?" * len(lessons))
+    grouped: dict[int, list[dict[str, Any]]] = {int(row["id"]): [] for row in lessons}
+    sql = f"""
+        SELECT ls.lesson_id, ls.subject_id AS id, ls.title AS lesson_title, ls.position,
+               s.title AS subject_title,
+               COUNT(t.id) AS total,
+               {_supported_sum()} AS supported
+        FROM lesson_subjects ls
+        LEFT JOIN subjects s ON s.id = ls.subject_id
+        LEFT JOIN tests t ON t.subject_id = ls.subject_id
+        WHERE ls.lesson_id IN ({marks})
+        GROUP BY ls.lesson_id, ls.subject_id
+        ORDER BY ls.position, ls.subject_id
+    """
+    lesson_ids = [int(row["id"]) for row in lessons]
+    for row in get_connection().execute(sql, lesson_ids).fetchall():
+        item = dict(row)
+        lesson_key = int(item.pop("lesson_id"))
+        grouped.setdefault(lesson_key, []).append({
+            "id": item["id"],
+            "title": item["subject_title"] or item["lesson_title"] or f"Предмет #{item['id']}",
+            "position": item["position"] or 0,
+            "total": item["total"] or 0,
+            "supported": item["supported"] or 0,
+        })
+    return [(lesson, grouped.get(int(lesson["id"]), [])) for lesson in lessons]
+
+
+def course_tree() -> list[tuple[dict[str, Any], list[tuple[dict[str, Any], list[dict[str, Any]]]]]]:
+    """Courses → lessons → subjects, ready for the sidebar."""
+    return [
+        (course, course_lessons(course["id"]))
+        for course in _course_stat_rows()
+    ]
+
+
+def delete_course(cid: int) -> None:
+    """Forget the course structure; cached subjects and tests stay."""
+    with transaction() as conn:
+        conn.execute(
+            "DELETE FROM lesson_subjects WHERE lesson_id IN"
+            " (SELECT id FROM lessons WHERE course_id = ?)",
+            (cid,),
+        )
+        conn.execute("DELETE FROM lessons WHERE course_id = ?", (cid,))
+        conn.execute("DELETE FROM courses WHERE id = ?", (cid,))
+
+
+def clear_courses() -> None:
+    with transaction() as conn:
+        conn.execute("DELETE FROM lesson_subjects")
+        conn.execute("DELETE FROM lessons")
+        conn.execute("DELETE FROM courses")
+
+
+# --------------------------------------------------------------------------- #
 # tests
 # --------------------------------------------------------------------------- #
 def upsert_test(
@@ -503,8 +832,10 @@ def overall_stats() -> dict[str, int]:
         " FROM tests"
     ).fetchone()
     fetched = conn.execute("SELECT MAX(fetched_at) FROM tests").fetchone()[0]
+    courses = conn.execute("SELECT COUNT(*) FROM courses").fetchone()[0]
     return {
         "subjects": subjects or 0,
+        "courses": courses or 0,
         "total": row["total"] or 0,
         "supported": row["supported"] or 0,
         "updated_at": fetched or 0,
@@ -553,6 +884,9 @@ def clear_cache() -> None:
         conn.execute("DELETE FROM tests")
         conn.execute("DELETE FROM knowledge_bases")
         conn.execute("DELETE FROM subjects")
+        conn.execute("DELETE FROM lesson_subjects")
+        conn.execute("DELETE FROM lessons")
+        conn.execute("DELETE FROM courses")
     with contextlib.suppress(sqlite3.Error):
         get_connection().execute("VACUUM")
 
