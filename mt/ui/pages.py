@@ -133,8 +133,8 @@ class PageHeader(QFrame):
         super().__init__(parent)
         self.setObjectName("pageHeader")
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 16, 24, 16)
-        outer.setSpacing(6)
+        outer.setContentsMargins(28, 20, 28, 12)
+        outer.setSpacing(8)
 
         self.breadcrumb = Breadcrumb()
         self.breadcrumb.navigate.connect(self.navigate)
@@ -221,13 +221,17 @@ class PageHeader(QFrame):
         margin = self.layout().contentsMargins()
         available = max(320, self.width() - margin.left() - margin.right())
         badges = self.badge_box.sizeHint().width() if self._badges else 0
+        more_width = self._more_button.sizeHint().width()
         shown = len(buttons)
         while shown > 0:
             buttons_width = sum(
                 widget.sizeHint().width() for widget in buttons[:shown]
             )
-            more = 44 if shown < len(buttons) else 0
-            needed = ElidedLabel.MIN_WIDTH + badges + buttons_width + more + 10 * (shown + 2)
+            more = more_width if shown < len(buttons) else 0
+            gaps = 10 * 3 + 8 * max(0, shown - 1)  # title|badges|stretch|actions
+            needed = (
+                ElidedLabel.MIN_WIDTH + badges + buttons_width + more + gaps
+            )
             if needed <= available:
                 break
             shown -= 1
@@ -276,8 +280,8 @@ class ScrollPage(QWidget):
 
         self.content = QWidget()
         self.body = QVBoxLayout(self.content)
-        self.body.setContentsMargins(24, 20, 24, 28)
-        self.body.setSpacing(16)
+        self.body.setContentsMargins(28, 18, 28, 30)
+        self.body.setSpacing(18)
         self.scroll.setWidget(self.content)
         layout.addWidget(self.scroll, 1)
 
@@ -310,12 +314,15 @@ class DashboardPage(ScrollPage):
         cards.setSpacing(12)
         has_data = stats["subjects"] > 0
         palette = self.main.theme_palette()
+        courses = int(stats["courses"] or 0)
+        homeworks = int(stats["subjects"] or 0)
+        tests = int(stats["total"] or 0)
         for caption, value, icon_name in (
-            ("предметов", fmt_int(stats["courses"]), "book"),
-            ("домашек", fmt_int(stats["subjects"]), "homework"),
-            ("тестов", fmt_int(stats["total"]), "layers"),
-            ("с готовым ответом", fmt_int(stats["supported"]), "check"),
-            ("обновлено", relative_time(stats["updated_at"]), "clock"),
+            (plural(courses, "предмет", "предмета", "предметов"), fmt_int(courses), "book"),
+            (plural(homeworks, "домашка", "домашки", "домашек"), fmt_int(homeworks), "homework"),
+            (plural(tests, "тест", "теста", "тестов"), fmt_int(tests), "layers"),
+            ("с ответом", fmt_int(stats["supported"]), "check"),
+            ("обновлено", relative_time(stats["updated_at"]).replace(" назад", ""), "clock"),
         ):
             card = StatCard(caption, value, icon_name)
             card.set_theme(palette)
@@ -1772,6 +1779,7 @@ class AllTestsPage(QWidget):
         self._timer.start()
 
     def apply_theme(self, palette: Palette) -> None:
+        self._palette = palette
         self.search.set_icon_color(palette.muted)
         self.reload()
 

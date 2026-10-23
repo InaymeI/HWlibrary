@@ -63,27 +63,6 @@ def _dedupe_tests(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(unique.values())
 
 
-def _last_page(payload: Any) -> int | None:
-    """``meta.last_page`` from a paginated v3 response, when present."""
-    nodes = [payload]
-    if isinstance(payload, dict):
-        for key in ("meta", "data", "pagination"):
-            node = payload.get(key)
-            if isinstance(node, dict):
-                nodes.append(node)
-                meta = node.get("meta")
-                if isinstance(meta, dict):
-                    nodes.append(meta)
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        for key in ("last_page", "lastPage", "total_pages", "totalPages"):
-            value = node.get(key)
-            if isinstance(value, int) and value > 0:
-                return value
-    return None
-
-
 @dataclass
 class SyncResult:
     subject_id: int = 0
@@ -162,6 +141,9 @@ class SyncThread(QThread):
             if result.error and str(result.error).startswith("auth"):
                 # Session expired: stop the whole queue instead of hammering.
                 break
+        # Persist any name that could only be read from a payload («Предмет
+        # #111137» → «История России»), so the next launch shows it too.
+        db.repair_course_titles()
         self.finished_all.emit(results)
 
     # ------------------------------------------------------------------ #
@@ -271,28 +253,28 @@ class SyncThread(QThread):
 
     # ------------------------------------------------------------------ #
     def _fetch_course(self, course_id: int) -> tuple[Any, list]:
-        """All lessons of a course, following pagination."""
-        first = self.api.get_education_group(course_id, page=1)
-        lessons = extract_lessons(first)
-        last_page = _last_page(first)
-        page = 1
-        while not self._stop:
-            if last_page is not None:
-                if page >= last_page:
-                    break
-            elif len(lessons) < config.COURSE_PAGE_SIZE:
+        """All lessons of a course, following ``lastKnownId`` pagination.
+
+        The backend ignores ``page``; the cursor is the ``id`` of the last
+        lesson already seen.  A page that brings nothing new ends the course.
+        """
+        page_size = config.COURSE_PAGE_SIZE
+        first = self.api.get_education_group(course_id, per_page=page_size)
+        batch = extract_lessons(first)
+        lessons = list(batch)
+        requests = 1
+        while batch and not self._stop:
+            if requests >= config.COURSE_MAX_PAGES:
+                self.log.emit(f"  остановлено после {requests} страниц (лимит)")
                 break
-            if page >= config.COURSE_MAX_PAGES:
-                self.log.emit(f"  остановлено на странице {page} (лимит)")
-                break
-            page += 1
             self._pause()
-            batch_payload = self.api.get_education_group(course_id, page=page)
-            batch = extract_lessons(batch_payload)
-            if not batch:
-                break
+            payload = self.api.get_education_group(
+                course_id, last_known_id=batch[-1].id, per_page=page_size
+            )
+            requests += 1
             known = {lesson.id for lesson in lessons}
-            lessons.extend(lesson for lesson in batch if lesson.id not in known)
+            batch = [lesson for lesson in extract_lessons(payload) if lesson.id not in known]
+            lessons.extend(batch)
         return first, lessons
 
     # ------------------------------------------------------------------ #

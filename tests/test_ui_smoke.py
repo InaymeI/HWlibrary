@@ -436,3 +436,80 @@ def test_lesson_card_collapses_homework(app, window):
     cards = [card for card in cards if isinstance(card, LessonCard)]
     assert cards == []  # the lesson page lists homeworks, not lesson cards
     assert window.stack.currentWidget() is window.lesson_page
+
+def test_each_course_collapses_on_its_own(app, window):
+    """The chevron of a предмет collapses that предмет, not the whole list."""
+    from PyQt6.QtTest import QTest
+
+    from mt import db
+    from tests.fake_server import COURSE_ID, COURSE_TITLE, LESSON_DB_ID
+
+    _subscribe_course(app, window)
+    # a second предмет must stay open while the first one is collapsed
+    db.upsert_course(222222, "Математика", {})
+    db.replace_course_lessons(222222, [{
+        "id": 55500001, "entity_id": 55500002, "title": "Урок 1",
+        "position": 1, "payload": {},
+    }])
+    window.sidebar.rebuild(window.theme_palette())
+    app.processEvents()
+
+    tree = window.sidebar.tree
+    first = tree.topLevelItem(0)
+    second = tree.topLevelItem(1)
+    assert first.text(0) == COURSE_TITLE  # a name, not «Предмет #111137»
+    assert first.isExpanded() and second.isExpanded()
+
+    index = tree.indexFromItem(first)
+    assert tree.branch_rect(index).isValid()
+    QTest.mouseClick(
+        tree.viewport(), Qt.MouseButton.LeftButton,
+        pos=tree.branch_rect(index).center(),
+    )
+    app.processEvents()
+    assert not first.isExpanded()          # collapsed by its own arrow
+    assert second.isExpanded()             # the neighbour is untouched
+    assert first.data(0, Qt.ItemDataRole.UserRole) == ("course", COURSE_ID)
+    assert first.child(0).data(0, Qt.ItemDataRole.UserRole) == ("lesson", LESSON_DB_ID)
+
+    # the same arrow expands it back
+    QTest.mouseClick(
+        tree.viewport(), Qt.MouseButton.LeftButton,
+        pos=tree.branch_rect(index).center(),
+    )
+    app.processEvents()
+    assert first.isExpanded()
+
+
+def test_light_theme_is_grey_and_selection_looks_glassy(app):
+    """No white panels any more; the glass pill is lighter than its panel."""
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from mt.theme import DARK, LIGHT
+    from mt.widgets import paint_color, paint_glass
+
+    for value in (LIGHT.surface, LIGHT.sidebar, LIGHT.surface_alt):
+        assert QColor(value).lightness() < 245, value
+    # the panels are the reference grey; the canvas behind them is darker
+    assert QColor(LIGHT.surface) == QColor("#a8a8a8")
+    assert QColor(LIGHT.surface).lightness() > QColor(LIGHT.bg).lightness()
+    # the tint is translucent, so the grey behind it stays visible
+    assert paint_color(LIGHT.glass_start).alpha() < 200
+    assert paint_color(LIGHT.glass_end).alpha() < 200
+    # and the hairline rim is brighter than the surface it sits on
+    assert paint_color(LIGHT.glass_border).lightness() > QColor(LIGHT.surface).lightness()
+
+    assert paint_color("rgba(255, 255, 255, 0.5)").alpha() == 128
+    assert paint_color("rgba(1, 2, 3, 0.5)").isValid()
+    assert paint_color("#ececee") == QColor("#ececee")
+
+    for palette in (LIGHT, DARK):
+        image = QImage(140, 40, QImage.Format.Format_ARGB32)
+        image.fill(QColor(palette.sidebar))
+        painter = QPainter(image)
+        paint_glass(painter, QRect(2, 2, 136, 36), palette, radius=10)
+        painter.end()
+        panel = QColor(palette.sidebar).lightness()
+        assert image.pixelColor(70, 20).lightness() > panel  # frosted, not dark
+        assert image.pixelColor(70, 20).lightness() < 250   # not a white box
