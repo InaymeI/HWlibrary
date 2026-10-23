@@ -163,6 +163,18 @@ class PageHeader(QFrame):
         self._badges: list[Badge] = []
         self._action_widgets: list[QWidget] = []
         self._more_button: QToolButton | None = None
+        self._menu_handler = None
+
+    def set_menu_handler(self, handler) -> None:
+        """``handler(global_pos)`` opens a context menu on the header."""
+        self._menu_handler = handler
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._menu_handler is not None:
+            self._menu_handler(event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def set_content(
         self,
@@ -216,12 +228,21 @@ class PageHeader(QFrame):
         buttons = self._action_widgets
         if not buttons:
             self._more_button.setVisible(False)
+            self.title.setMinimumWidth(
+                min(self.title.sizeHint().width(), self.title.maximumWidth())
+            )
             return
 
         margin = self.layout().contentsMargins()
         available = max(320, self.width() - margin.left() - margin.right())
         badges = self.badge_box.sizeHint().width() if self._badges else 0
         more_width = self._more_button.sizeHint().width()
+        # the title keeps its own width: eliding «Предмет #111102» down to
+        # «Предмет …» while a full-size button sits next to it is worse than
+        # moving that button into «…»
+        title_width = max(
+            ElidedLabel.MIN_WIDTH, min(self.title.sizeHint().width(), ElidedLabel.MAX_WIDTH)
+        )
         shown = len(buttons)
         while shown > 0:
             buttons_width = sum(
@@ -229,12 +250,18 @@ class PageHeader(QFrame):
             )
             more = more_width if shown < len(buttons) else 0
             gaps = 10 * 3 + 8 * max(0, shown - 1)  # title|badges|stretch|actions
-            needed = (
-                ElidedLabel.MIN_WIDTH + badges + buttons_width + more + gaps
-            )
+            needed = title_width + badges + buttons_width + more + gaps
             if needed <= available:
                 break
             shown -= 1
+
+        # the layout must not steal the title's width from under the buttons:
+        # whatever is left after the badges and the visible actions is the
+        # honest minimum, and the text elides inside exactly that box
+        buttons_width = sum(widget.sizeHint().width() for widget in buttons[:shown])
+        more = more_width if shown < len(buttons) else 0
+        room = available - badges - buttons_width - more - 10 * 3 - 8 * max(0, shown - 1)
+        self.title.setMinimumWidth(max(120, min(title_width, room)))
 
         for widget in buttons[:shown]:
             widget.setVisible(True)
@@ -414,7 +441,7 @@ class DashboardPage(ScrollPage):
             self.body.addWidget(SectionTitle("Предметы", len(courses)))
             for course in courses[:4]:
                 row = ListRow(
-                    course["title"] or f"Предмет #{course['id']}",
+                    db.course_label(course),
                     " · ".join((
                         f"{course['lesson_count']} "
                         f"{plural(course['lesson_count'], 'урок', 'урока', 'уроков')}",
@@ -429,6 +456,9 @@ class DashboardPage(ScrollPage):
                 row.clicked.connect(
                     lambda _checked=False, cid=course["id"]: self.navigate.emit(f"course:{cid}")
                 )
+                row.set_menu_handler(
+                    lambda pos, cid=course["id"]: self.main.course_menu(cid).exec(pos)
+                )
                 self.body.addWidget(row)
             if len(courses) > 4:
                 more_courses = ghost_button(
@@ -442,7 +472,7 @@ class DashboardPage(ScrollPage):
             self.body.addWidget(SectionTitle("Домашки вне предметов", len(standalone)))
             for homework in standalone[:6]:
                 row = ListRow(
-                    homework["title"] or f"Домашка #{homework['id']}",
+                    db.subject_label(homework),
                     " · ".join((
                         f"{int(homework['sections'])} "
                         f"{plural(int(homework['sections']), 'раздел', 'раздела', 'разделов')}",
@@ -455,6 +485,9 @@ class DashboardPage(ScrollPage):
                 row.clicked.connect(
                     lambda _checked=False, sid=int(homework["id"]):
                         self.navigate.emit(f"homework:{sid}")
+                )
+                row.set_menu_handler(
+                    lambda pos, sid=int(homework["id"]): self.main.homework_menu(sid).exec(pos)
                 )
                 self.body.addWidget(row)
         self.body.addStretch(1)
@@ -514,13 +547,16 @@ class CoursesPage(ScrollPage):
                 f"обновлено {relative_time(course.get('fetched_at'))}",
             ))
             row = ListRow(
-                course["title"] or f"Предмет #{course['id']}",
+                db.course_label(course),
                 subtitle,
                 trailing=f"{supported}/{total}",
                 icon_name="book",
             )
             row.clicked.connect(
                 lambda _checked=False, cid=course["id"]: self.navigate.emit(f"course:{cid}")
+            )
+            row.set_menu_handler(
+                lambda pos, cid=course["id"]: self.main.course_menu(cid).exec(pos)
             )
             self.body.addWidget(row)
         self.body.addStretch(1)
@@ -546,7 +582,7 @@ def homework_row_widget(
     elif sections:
         bits.append("заданий пока нет")
     row = ListRow(
-        homework.get("title") or f"Домашка #{subject_id}",
+        db.subject_label(homework),
         " · ".join(bits),
         trailing=f"{supported}/{total}" if total else "",
         icon_name=icon,
@@ -710,11 +746,20 @@ class CoursePage(ScrollPage):
 
         stats = db.course_stats(self.course_id)
         groups = db.course_homeworks(self.course_id)
-        title = course["title"] or f"Предмет #{self.course_id}"
+        title = db.course_label(course)
         sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_course(self.course_id))
         delete_button = ghost_button("Удалить из кэша", "trash", color_key="danger")
         delete_button.clicked.connect(lambda: self.main.delete_course(self.course_id))
+        self.header.set_menu_handler(
+            lambda pos: self.main.course_menu(self.course_id).exec(pos)
+        )
+        badges: list[tuple[str, str]] = []
+        if stats["supported"]:
+            badges.append((f"{fmt_int(stats['supported'])} с ответом", "success"))
+        if db.title_is_generic(course.get("title")):
+            # the API sent no name for this предмет — say how to fix it
+            badges.append(("нет имени — ПКМ", "warning"))
         self.header.set_content(
             title,
             " · ".join((
@@ -726,10 +771,7 @@ class CoursePage(ScrollPage):
                 f"обновлено {relative_time(course.get('fetched_at'))}",
             )),
             breadcrumb=[("Библиотека", "dash"), ("Предметы", "courses"), (title, None)],
-            badges=[
-                (f"{fmt_int(stats['supported'])} с ответом",
-                 "success" if stats["supported"] else "muted"),
-            ],
+            badges=badges,
             actions=[sync_button, delete_button],
         )
 
@@ -811,7 +853,7 @@ class LessonPage(ScrollPage):
             breadcrumb=[
                 ("Библиотека", "dash"),
                 ("Предметы", "courses"),
-                (course.get("title") or f"Предмет #{lesson['course_id']}",
+                (db.course_label(course),
                  f"course:{lesson['course_id']}"),
                 (title, None),
             ],
@@ -897,7 +939,7 @@ class HomeworkPage(ScrollPage):
         meta = lesson_meta(lesson) if lesson else None
         total = int(homework.get("total") or 0)
         supported = int(homework.get("supported") or 0)
-        title = homework.get("title") or f"Домашка #{self.subject_id}"
+        title = db.subject_label(homework)
 
         sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_subject(self.subject_id))
@@ -906,7 +948,7 @@ class HomeworkPage(ScrollPage):
         if lesson:
             if course:
                 breadcrumb.append(
-                    (course.get("title") or f"Предмет #{course.get('id')}",
+                    (db.course_label(course),
                      f"course:{course.get('id')}")
                 )
             breadcrumb.append(
@@ -916,6 +958,9 @@ class HomeworkPage(ScrollPage):
             )
         breadcrumb.append((title, None))
 
+        self.header.set_menu_handler(
+            lambda pos: self.main.homework_menu(self.subject_id).exec(pos)
+        )
         self.header.set_content(
             title,
             " · ".join(bit for bit in (
@@ -1631,7 +1676,7 @@ class TestPage(ScrollPage):
         subject = db.get_subject(row["subject_id"]) or {}
         kbs = self.kbs or {}
         for caption, value in (
-            ("Домашка", subject.get("title") or f"Домашка #{row['subject_id']}"),
+            ("Домашка", db.subject_label(subject)),
             ("Раздел", kbs.get("title") or f"Раздел #{row['kbs_id']}"),
             ("Сохранено", cached),
             ("Правильных ответов", str(len(details.right_options))),
@@ -1715,7 +1760,7 @@ class AllTestsPage(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
-        self.search = SearchField("Название, ID, тип или раздел…")
+        self.search = SearchField("Задание, домашка, раздел, ID…")
         self.search.textChanged.connect(self._schedule_reload)
         controls.addWidget(self.search, 1)
 
@@ -1783,6 +1828,13 @@ class AllTestsPage(QWidget):
         self.search.set_icon_color(palette.muted)
         self.reload()
 
+    def reset_filters(self) -> None:
+        """Drop the домашка/type scope, keeping the search text untouched."""
+        for combo in (self.subject_combo, self.type_combo):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+
     def refresh_subjects(self) -> None:
         current = self.subject_combo.currentData()
         self.subject_combo.blockSignals(True)
@@ -1790,7 +1842,7 @@ class AllTestsPage(QWidget):
         self.subject_combo.addItem("Все домашки", None)
         for subject in db.list_subjects():
             self.subject_combo.addItem(
-                subject["title"] or f"Домашка #{subject['id']}", subject["id"]
+                db.subject_label(subject), subject["id"]
             )
         index = self.subject_combo.findData(current)
         self.subject_combo.setCurrentIndex(index if index >= 0 else 0)
@@ -1847,14 +1899,22 @@ class AllTestsPage(QWidget):
         if self.table.rowCount():
             self.table.sortItems(sort_column, sort_order)
 
+        if subject_id is not None:
+            scope = f" · домашка «{self.subject_combo.currentText()}»"
+        elif type_filter != "all":
+            scope = f" · тип: {self.type_combo.currentText()}"
+        else:
+            scope = ""
         shown = len(rows)
-        if total > shown:
+        if not rows and (search or scope):
+            self.count_label.setText(f"Ничего не найдено{scope}")
+        elif total > shown:
             self.count_label.setText(
-                f"Показаны первые {fmt_int(shown)} из {fmt_int(total)} — уточните поиск"
+                f"Показаны первые {fmt_int(shown)} из {fmt_int(total)}{scope} — уточните поиск"
             )
         else:
             self.count_label.setText(
-                f"{fmt_int(total)} {plural(total, 'задание', 'задания', 'заданий')}"
+                f"{fmt_int(total)} {plural(total, 'задание', 'задания', 'заданий')}{scope}"
             )
 
     # ------------------------------------------------------------------ #

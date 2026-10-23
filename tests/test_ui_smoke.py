@@ -513,3 +513,106 @@ def test_light_theme_is_grey_and_selection_looks_glassy(app):
         panel = QColor(palette.sidebar).lightness()
         assert image.pixelColor(70, 20).lightness() > panel  # frosted, not dark
         assert image.pixelColor(70, 20).lightness() < 250   # not a white box
+
+
+def test_sidebar_search_drops_a_homework_filter(app, window):
+    """Searching from the sidebar must not stay inside one домашка."""
+    from mt import db
+
+    page = window.all_page
+    window.navigate("all")
+    app.processEvents()
+    assert page.subject_combo.count() > 1
+    page.subject_combo.setCurrentIndex(1)
+    assert page.subject_combo.currentData() == 777
+
+    window.sidebar.search.setText("1001")
+    window.sidebar._search_triggered()
+    app.processEvents()
+    page.reload()
+    assert page.subject_combo.currentIndex() == 0
+    assert page.search.text() == "1001"
+    assert page.table.rowCount() == 1
+    assert "домашка" not in page.count_label.text().lower()
+    assert db.query_tests_count(search="1001") == 1
+
+
+def test_homework_scope_is_shown_in_the_count_label(app, window):
+    page = window.all_page
+    window.navigate("all")
+    page.subject_combo.setCurrentIndex(1)
+    page.search.setText("")
+    page.reload()
+    assert "домашка" in page.count_label.text().lower()
+
+
+def test_course_and_homework_menus_offer_rename(app, window):
+    """Right click on a курс row or page header must expose «Переименовать…»."""
+    from mt import db
+
+    db.upsert_course(111102, "Предмет #111102", {})
+    window.refresh()
+    app.processEvents()
+
+    course_menu = window.course_menu(111102)
+    titles = [action.text() for action in course_menu.actions()]
+    assert "Переименовать…" in titles
+
+    homework_menu = window.homework_menu(777)
+    assert "Переименовать…" in [action.text() for action in homework_menu.actions()]
+
+    # the courses page row and the course page header carry the handler
+    window.navigate("courses")
+    app.processEvents()
+    rows = [
+        window.courses_page.body.itemAt(index).widget()
+        for index in range(window.courses_page.body.count())
+    ]
+    course_rows = [row for row in rows if hasattr(row, "set_menu_handler")
+                   and row.property("clickable")]
+    assert course_rows and all(row._menu_handler for row in course_rows)
+
+    window.navigate("course:111102")
+    app.processEvents()
+    assert window.course_page.header._menu_handler is not None
+
+
+def test_rename_course_updates_sidebar_and_page(app, window, monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+
+    from mt import db
+
+    db.upsert_course(111102, "Предмет #111102", {})
+    window.refresh()
+    window.navigate("course:111102")
+    app.processEvents()
+
+    monkeypatch.setattr(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("Мой предмет", True))
+    )
+    window.rename_course(111102)
+    app.processEvents()
+
+    assert db.get_course(111102)["title"] == "Мой предмет"
+    assert window.course_page.header.title.text() == "Мой предмет"
+    tree = window.sidebar.tree
+    assert any(
+        tree.topLevelItem(index).text(0) == "Мой предмет"
+        for index in range(tree.topLevelItemCount())
+    )
+
+
+def test_rename_homework_survives_and_updates_page(app, window, monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+
+    from mt import db
+
+    window.navigate("homework:777")
+    app.processEvents()
+    monkeypatch.setattr(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("Моя домашка", True))
+    )
+    window.rename_homework(777)
+    app.processEvents()
+    assert db.get_subject(777)["title"] == "Моя домашка"
+    assert window.homework_page.header.title.text() == "Моя домашка"
