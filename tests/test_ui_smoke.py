@@ -644,3 +644,40 @@ def test_rename_homework_survives_and_updates_page(app, window, monkeypatch):
     app.processEvents()
     assert db.get_subject(777)["title"] == "Моя домашка"
     assert window.homework_page.header.title.text() == "Моя домашка"
+
+
+def test_aero_taskbar_and_theme_roundtrip(app, window):
+    """Aero rearranges chrome without losing navigation or status updates."""
+    from PyQt6.QtWidgets import QFrame
+
+    from mt.theme import stylesheet
+
+    assert "$" not in stylesheet("aero")
+    window.navigate("homework:777")
+    for _ in range(3):
+        window.apply_theme("aero", persist=False)
+        app.processEvents()
+        assert window.theme_palette().name == "aero"
+        assert window.rail.is_horizontal
+        assert not window.statusBar().isVisible()
+        assert window.rail.orb.menu() is window.main_menu
+        assert window.rail.tray_clock.text()
+        assert window.stack.currentWidget() is window.homework_page
+        window.status_label.setText("Проверка статуса")
+        assert window.rail.tray_status.text() == "Проверка статуса"
+        assert window.rail.geometry().width() > window.rail.geometry().height()
+        window.apply_theme("light", persist=False)
+        app.processEvents()
+        assert not window.rail.is_horizontal
+        assert window.statusBar().isVisible()
+        assert window.rail.width() == 72
+        assert not window.rail.findChildren(QFrame, "railDivider")
+
+
+def test_aero_all_pages_render(app, window):
+    window.apply_theme("aero", persist=False)
+    for target in ("dash", "courses", "all", "homework:777", "kbs:501", "test:1001"):
+        window.navigate(target)
+        app.processEvents()
+        assert not window.grab().isNull()
+    assert window.theme_actions["aero"].isChecked()

@@ -157,6 +157,90 @@ def paint_color(value: str) -> QColor:
     return QColor(text)
 
 
+def paint_aero_pill(
+    painter: QPainter,
+    rect: QRect,
+    palette: Palette,
+    *,
+    radius: int = 12,
+    strength: float = 1.0,
+) -> None:
+    """Windows 7 style selection: a glossy aqua pill with a white rim.
+
+    The 2009 look is a *vertical* gradient — almost white at the top, deeper
+    aqua at the bottom — plus a bright specular band across the upper half.
+    ``strength`` < 1 fades everything for hover.
+    """
+    box = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+    if box.isEmpty():
+        return
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    body_path = QPainterPath()
+    body_path.addRoundedRect(box, radius, radius)
+
+    # a cool shadow so the pill lifts off the white panel
+    shade = paint_color(palette.glass_shadow)
+    painter.save()
+    outside = QPainterPath()
+    outside.addRect(box.adjusted(-7.0, -7.0, 7.0, 9.0))
+    painter.setClipPath(outside.subtracted(body_path))
+    painter.setPen(Qt.PenStyle.NoPen)
+    for spread, factor in ((4.0, 0.10), (2.4, 0.16)):
+        shadow = QColor(shade)
+        shadow.setAlphaF(min(1.0, shade.alphaF() * factor * strength))
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(
+            box.adjusted(-spread, -spread + 1.0, spread, spread + 2.0),
+            radius + spread,
+            radius + spread,
+        )
+    painter.restore()
+
+    top = paint_color(palette.gloss_top)
+    bottom = paint_color(palette.gloss_bottom)
+    top.setAlphaF(min(1.0, top.alphaF() * strength))
+    bottom.setAlphaF(min(1.0, bottom.alphaF() * strength))
+    body = QLinearGradient(box.topLeft(), box.bottomLeft())
+    body.setColorAt(0.0, top)
+    body.setColorAt(0.52, top)
+    body.setColorAt(1.0, bottom)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(body)
+    painter.drawPath(body_path)
+
+    # specular band: the upper half is much brighter than the lower one
+    painter.save()
+    painter.setClipPath(body_path)
+    clear = QColor(Qt.GlobalColor.white)
+    clear.setAlphaF(0.0)
+    gloss = QColor(Qt.GlobalColor.white)
+    gloss.setAlphaF(0.55 * strength)
+    band = QLinearGradient(box.topLeft(), box.bottomLeft())
+    band.setColorAt(0.0, gloss)
+    band.setColorAt(0.42, gloss)
+    band.setColorAt(0.55, clear)
+    band.setColorAt(1.0, clear)
+    painter.setBrush(band)
+    painter.drawRect(box)
+    painter.restore()
+
+    # white rim, thinner at the bottom — exactly like an Aero selection
+    rim = paint_color(palette.glass_border)
+    light = QColor(rim)
+    light.setAlphaF(min(1.0, rim.alphaF() * strength))
+    dim = QColor(rim)
+    dim.setAlphaF(min(1.0, rim.alphaF() * 0.55 * strength))
+    rim_gradient = QLinearGradient(box.topLeft(), box.bottomLeft())
+    rim_gradient.setColorAt(0.0, light)
+    rim_gradient.setColorAt(0.6, light)
+    rim_gradient.setColorAt(1.0, dim)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QBrush(rim_gradient), 1.0))
+    painter.drawRoundedRect(box, radius, radius)
+    painter.restore()
+
+
 def paint_glass(
     painter: QPainter,
     rect: QRect,
@@ -172,7 +256,14 @@ def paint_glass(
     towards the right, a specular line along the top edge and a rim that stays
     bright on top and fades at the bottom.  ``strength`` < 1 fades it down for
     hover.
+
+    The Frutiger Aero theme swaps this for :func:`paint_aero_pill`, so every
+    caller (tree rows, nav rows, rail tiles) gets the glossy 2009 selection
+    without knowing about themes.
     """
+    if palette.name == "aero":
+        paint_aero_pill(painter, rect, palette, radius=radius, strength=strength)
+        return
     box = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
     if box.isEmpty():
         return
