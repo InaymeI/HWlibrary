@@ -177,25 +177,8 @@ def paint_aero_pill(
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     body_path = QPainterPath()
+    radius = 3
     body_path.addRoundedRect(box, radius, radius)
-
-    # a cool shadow so the pill lifts off the white panel
-    shade = paint_color(palette.glass_shadow)
-    painter.save()
-    outside = QPainterPath()
-    outside.addRect(box.adjusted(-7.0, -7.0, 7.0, 9.0))
-    painter.setClipPath(outside.subtracted(body_path))
-    painter.setPen(Qt.PenStyle.NoPen)
-    for spread, factor in ((4.0, 0.10), (2.4, 0.16)):
-        shadow = QColor(shade)
-        shadow.setAlphaF(min(1.0, shade.alphaF() * factor * strength))
-        painter.setBrush(shadow)
-        painter.drawRoundedRect(
-            box.adjusted(-spread, -spread + 1.0, spread, spread + 2.0),
-            radius + spread,
-            radius + spread,
-        )
-    painter.restore()
 
     top = paint_color(palette.gloss_top)
     bottom = paint_color(palette.gloss_bottom)
@@ -226,7 +209,7 @@ def paint_aero_pill(
     painter.restore()
 
     # white rim, thinner at the bottom — exactly like an Aero selection
-    rim = paint_color(palette.glass_border)
+    rim = QColor("#7da2ce")
     light = QColor(rim)
     light.setAlphaF(min(1.0, rim.alphaF() * strength))
     dim = QColor(rim)

@@ -621,25 +621,17 @@ $aero
 AERO_QSS = """
 QMainWindow, QDialog, QWizard, QWidget#shell { background: $bg; }
 
-/* --- glass panels: white rim, glossy vertical gradient --- */
-QFrame#sidePanel, QFrame#content {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 $panel_top, stop:0.55 $panel_top, stop:1 $panel_bottom);
-    border: 1px solid $panel_edge;
-    border-radius: 18px;
-}
-QFrame#card {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(255, 255, 255, 0.95), stop:1 rgba(222, 244, 255, 0.78));
-    border: 1px solid rgba(255, 255, 255, 0.90);
-    border-radius: 12px;
-}
-QFrame#cardFlat {
-    background: rgba(255, 255, 255, 0.60);
-    border: 1px solid rgba(255, 255, 255, 0.92);
-    border-radius: 9px;
-}
-QFrame#card[clickable="true"]:hover { background: rgba(255, 255, 255, 0.90); }
+/* Vista / Windows 7 used Segoe UI, not the modern Inter display face.
+   Tahoma is an installed Windows-era fallback; no proprietary font is bundled. */
+QWidget { font-family: "Segoe UI", "Tahoma", "Noto Sans", "DejaVu Sans"; font-size: 12px; }
+QLabel[role="mono"], QPlainTextEdit#log { font-family: "Consolas", "DejaVu Sans Mono"; }
+QLabel[role="h2"] { font-size: 15px; font-weight: 400; color: #003c74; }
+QLabel[role="h3"] { font-size: 13px; font-weight: 600; }
+QLabel[role="stat"] { font-size: 28px; font-weight: 400; }
+QLabel[role="statSmall"] { font-size: 20px; font-weight: 400; }
+QLabel[role="badge"] { border-radius: 3px; padding: 1px 5px; font-weight: 400; }
+QToolButton#navRow { font-size: 12px; border-radius: 3px; padding: 0 8px; }
+QFrame#card[clickable="true"]:hover { background: #e8f4ff; border-color: #7da2ce; }
 
 /* Explorer-era proportions: glass frame, white working area, blue command band. */
 QLabel#aeroCaption {
@@ -651,7 +643,7 @@ QFrame#sidePanel {
     border: 1px solid #d6edff; border-radius: 5px;
 }
 QFrame#content {
-    background: rgba(255, 255, 255, 0.96);
+    background: #ffffff;
     border: 1px solid #e6f6ff; border-radius: 5px;
 }
 QFrame#pageHeader {
@@ -659,10 +651,10 @@ QFrame#pageHeader {
         stop:0 #f5fbff,stop:0.55 #e6f2fc,stop:1 #c6def3);
     border-bottom: 1px solid #94b8d4;
 }
-QLabel[role="h1"] { font-size: 25px; font-weight: 400; color: #173c65; }
+QLabel[role="h1"] { font-size: 22px; font-weight: 400; color: #173c65; }
 QFrame#card {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff,stop:1 #edf6fc);
-    border: 1px solid #c0d8e9; border-radius: 5px;
+    border: 1px solid #d3dfea; border-radius: 3px;
 }
 QFrame#cardFlat { border: 1px solid #c0d8e9; border-radius: 4px; }
 QTreeWidget#sidebar { border-radius: 3px; }
@@ -698,8 +690,8 @@ QPushButton {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 #ffffff, stop:0.48 #f0fbff, stop:0.52 #d6eefc, stop:1 #b6dff6);
     border: 1px solid #8cc3e2;
-    border-radius: 6px;
-    padding: 7px 14px;
+    border-radius: 3px;
+    padding: 4px 10px;
 }
 QPushButton:hover {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -795,7 +787,7 @@ QMenu {
     border-radius: 8px;
     padding: 6px;
 }
-QMenu::item { border-radius: 4px; padding: 7px 26px 7px 12px; }
+QMenu::item { border-radius: 2px; padding: 5px 26px 5px 12px; }
 QMenu::item:selected {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 #d8f1ff, stop:1 #a9dcf8);

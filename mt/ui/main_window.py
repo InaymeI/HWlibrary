@@ -243,12 +243,14 @@ class SidebarDelegate(QStyledItemDelegate):
         self._secondary = "#3d3d40"
         self._muted = "#5e5e62"
         self._chip = "rgba(255, 255, 255, 0.30)"
+        self._row_height = SidebarTree.ROW_HEIGHT
 
     def set_palette(self, palette: Palette) -> None:
         self._text = palette.text
         self._secondary = palette.text_secondary
         self._muted = palette.muted
         self._chip = palette.selection
+        self._row_height = 28 if palette.name == "aero" else SidebarTree.ROW_HEIGHT
         self._tree.viewport().update()
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
@@ -302,7 +304,7 @@ class SidebarDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
-        return QSize(0, SidebarTree.ROW_HEIGHT)
+        return QSize(0, self._row_height)
 
 
 
@@ -326,6 +328,7 @@ class NavRow(QToolButton):
 
     def set_palette(self, palette: Palette) -> None:
         self._palette = palette
+        self.setFixedHeight(30 if palette.name == "aero" else 44)
         self._refresh_icon()
         self.update()
 
@@ -1789,6 +1792,26 @@ class MainWindow(QMainWindow):
         self.body.updateGeometry()
         self._update_canvas()
 
+    def _apply_density(self) -> None:
+        aero = self._pal.name == "aero"
+        for frame in self.stack.findChildren(QFrame):
+            if frame.objectName() not in ("card", "cardFlat", "pageHeader"):
+                continue
+            layout = frame.layout()
+            if layout is None:
+                continue
+            if not hasattr(frame, "_original_metrics"):
+                m = layout.contentsMargins()
+                frame._original_metrics = ((m.left(), m.top(), m.right(), m.bottom()),
+                                           layout.spacing())
+            margins, spacing = frame._original_metrics
+            if aero:
+                layout.setContentsMargins(*(min(value, 12) for value in margins))
+                layout.setSpacing(min(spacing, 6))
+            else:
+                layout.setContentsMargins(*margins)
+                layout.setSpacing(spacing)
+
     def apply_theme(self, name: str, persist: bool = True) -> None:
         if name == "system":
             scheme = QGuiApplication.styleHints().colorScheme()
@@ -1818,6 +1841,9 @@ class MainWindow(QMainWindow):
         if act and not act.isChecked():
             act.setChecked(True)
         self.sidebar.rebuild(self._pal)
+        # Use Explorer-like density only in Aero, retaining original metrics
+        # for the flat themes. Re-run after navigation for newly built cards.
+        self._apply_density()
         if persist:
             self.settings.setValue("ui/theme", name)
 
@@ -1837,6 +1863,7 @@ class MainWindow(QMainWindow):
         self._from_history = False
         self._update_history_buttons()
         self._open(target)
+        self._apply_density()
 
     def _current_target(self) -> str | None:
         widget = self.stack.currentWidget()

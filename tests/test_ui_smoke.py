@@ -707,3 +707,28 @@ def test_aero_assets_and_icon_cache_roundtrip(app, window):
     window.apply_theme("light", persist=False)
     assert not window.aero_caption.isVisible()
     assert icons.pixmap("book", "#ffffff", 32).toImage() == flat
+
+
+def test_aero_typography_and_density_restore(app, window):
+    """The period font stack and compact metrics must not leak into flat themes."""
+    from PyQt6.QtWidgets import QFrame
+
+    from mt.theme import stylesheet
+
+    assert 'font-family: "Segoe UI", "Tahoma"' in stylesheet("aero")
+    window.apply_theme("light", persist=False)
+    header = window.homework_page.findChild(QFrame, "pageHeader")
+    original = header.layout().contentsMargins()
+    window.apply_theme("aero", persist=False)
+    app.processEvents()
+    assert header.layout().contentsMargins().top() <= 12
+    assert window.sidebar._nav_rows["dash"].height() == 30
+    delegate = window.sidebar.tree.itemDelegate()
+    assert delegate._row_height == 28
+    window.navigate("homework:777")
+    app.processEvents()
+    window.apply_theme("light", persist=False)
+    app.processEvents()
+    assert header.layout().contentsMargins() == original
+    assert window.sidebar._nav_rows["dash"].height() == 44
+    assert delegate._row_height == 40
