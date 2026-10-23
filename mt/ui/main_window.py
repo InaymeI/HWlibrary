@@ -1720,6 +1720,12 @@ class MainWindow(QMainWindow):
         self.log_dock.setVisible(bool(self.settings.value("ui/log", False, type=bool)))
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        batch_dialog = getattr(self, "_lesson_send_dialog", None)
+        if (batch_dialog is not None and batch_dialog.worker is not None
+                and batch_dialog.worker.isRunning()):
+            batch_dialog.reject()
+            event.ignore()
+            return
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("window/splitter", self.splitter.sizes())
@@ -2112,6 +2118,25 @@ class MainWindow(QMainWindow):
         if not self._ensure_cookies(silent=silent):
             return
         self._start_sync([], [course_id])
+
+    def send_lesson_answers(self, lesson_id: int) -> None:
+        from .batch_dialog import LessonSendDialog
+
+        if self._sync_thread() is not None:
+            self.toast("Дождитесь завершения синхронизации", error=True)
+            return
+        if not self._ensure_cookies():
+            return
+        try:
+            dialog = LessonSendDialog(self.api, lesson_id, self)
+        except ValueError as exc:
+            self.toast(str(exc), error=True)
+            return
+        self._lesson_send_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._lesson_send_dialog = None
 
     def sync_lesson(self, lesson_id: int) -> None:
         """Refresh the subjects of a single lesson."""

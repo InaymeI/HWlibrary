@@ -455,7 +455,9 @@ def test_api_reports_auth_and_network_errors(monkeypatch):
 
 
 def test_api_rejects_non_json_login_page(monkeypatch):
-    from mt.api import Api, AuthError
+    from requests.cookies import RequestsCookieJar
+
+    from mt.api import Api, ApiError
 
     monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-nope2.json")
     api = Api()
@@ -467,11 +469,13 @@ def test_api_rejects_non_json_login_page(monkeypatch):
         reason = "OK"
 
     class FakeSession:
+        cookies = RequestsCookieJar()
+
         def request(self, *args, **kwargs):
             return FakeResponse()
 
     api._session = FakeSession()  # type: ignore[assignment]
-    with pytest.raises(AuthError):
+    with pytest.raises(ApiError, match="HTML вместо JSON"):
         api.get_json("/api/whatever")
 
 
