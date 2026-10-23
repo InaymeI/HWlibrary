@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "maximumtest-desktop"
 APP_TITLE = "MaximumTest Library"
-APP_VERSION = "0.5.5"
+APP_VERSION = "0.5.6"
 ORG_NAME = "maximumtest-desktop"
 
 # ``MT_*`` overrides are handy for development (demo databases, staging hosts).
@@ -55,9 +55,17 @@ POST_RETRY_DELAY = 0.4
 #: Override with ``MT_SYNC_DELAY="0.6,1.4"`` (or ``0`` to disable).
 SYNC_DELAY_RANGE = (0.6, 1.4)
 
+#: How much rarer the deep walk is: it walks every course, lesson, homework and
+#: section, so the same rhythm would mean hundreds of requests in a row.
+DEEP_SYNC_PACE = 1.5
 
-def _delay_range_from_env() -> tuple[float, float] | None:
-    raw = os.environ.get("MT_SYNC_DELAY")
+#: A ``lessons_block`` may contain lessons, and those may nest further; the
+#: depth limit keeps a malformed answer from looping forever.
+COURSE_STRUCTURE_DEPTH = 4
+
+
+def _delay_range_from_env(name: str = "MT_SYNC_DELAY") -> tuple[float, float] | None:
+    raw = os.environ.get(name)
     if raw is None:
         return None
     text = raw.strip().replace(",", " ").split()
@@ -77,12 +85,29 @@ _env_delay = _delay_range_from_env()
 if _env_delay is not None:
     SYNC_DELAY_RANGE = _env_delay
 
+_env_deep_delay = _delay_range_from_env("MT_DEEP_SYNC_DELAY")
+if _env_deep_delay is not None:
+    DEEP_SYNC_DELAY_RANGE = _env_deep_delay
+else:
+    DEEP_SYNC_DELAY_RANGE = (
+        round(SYNC_DELAY_RANGE[0] * DEEP_SYNC_PACE, 3),
+        round(SYNC_DELAY_RANGE[1] * DEEP_SYNC_PACE, 3),
+    )
 
-def sync_delay() -> float:
+
+def delay_range(deep: bool = False) -> tuple[float, float]:
+    """Pause range in seconds: the deep walk deliberately runs rarer."""
+    return DEEP_SYNC_DELAY_RANGE if deep else SYNC_DELAY_RANGE
+
+
+def sync_delay(deep: bool = False) -> float:
     """A random pause (in seconds) to sleep before the next request."""
     import random
 
-    low, high = SYNC_DELAY_RANGE
+    # ``MT_SYNC_DELAY=0`` (tests, cron) disables pacing for both modes.
+    if SYNC_DELAY_RANGE[1] <= 0:
+        return 0.0
+    low, high = delay_range(deep)
     if high <= 0:
         return 0.0
     if high <= low:

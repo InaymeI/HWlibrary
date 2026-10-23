@@ -608,6 +608,107 @@ def _payload_list(payload: Any) -> list[Any]:
     return node if isinstance(node, list) else []
 
 
+#: ``type`` values of education-group nodes that group lessons instead of being
+#: a lesson themselves.  Some courses answer the list endpoint with such nodes
+#: (``children: null``) and only reveal the lessons in ``/structures/<id>``.
+BLOCK_TYPES = frozenset({
+    "lessons_block", "lesson_block", "lessons_group", "lesson_group",
+    "module", "section", "block", "group",
+})
+#: Substrings that mark a container even when the exact type is unknown.
+_BLOCK_MARKERS = ("block", "group", "module", "section")
+#: ``entityInfo.type`` values that are pauses in the schedule, not lessons.
+REST_TYPES = frozenset({"vacation", "holiday", "break", "rest", "day_off"})
+#: Keys a ``/structures/<id>`` payload may wrap the node in.
+_STRUCTURE_KEYS = ("data", "structure", "node", "result")
+
+
+def course_nodes(payload: Any) -> list[dict[str, Any]]:
+    """Top-level items of an education-group page (``data`` or the list itself)."""
+    return [item for item in _payload_list(payload) if isinstance(item, dict)]
+
+
+def node_id(node: Any) -> int | None:
+    """``id`` of an education-group node, as an int."""
+    return _as_int(node.get("id")) if isinstance(node, dict) else None
+
+
+def is_lesson_node(node: Any) -> bool:
+    """True when an education-group item is a lesson, not a container of them.
+
+    A lesson always carries ``entityInfo`` with its own id.  A ``lessons_block``
+    («III семестр») has ``entityInfo: null`` and ``children: null`` — its lessons
+    are only returned by ``GET …/structures/<block id>``.  Shapes that match
+    neither rule keep the previous behaviour (treated as a lesson), so courses
+    that never use blocks are parsed exactly as before.
+    """
+    if not isinstance(node, dict):
+        return False
+    entity = node.get("entityInfo") or node.get("entity_info") or {}
+    if isinstance(entity, dict) and _as_int(entity.get("id")):
+        return True
+    kind = str(node.get("type") or "").strip().lower()
+    if kind in BLOCK_TYPES or any(marker in kind for marker in _BLOCK_MARKERS):
+        return False
+    children = node.get("children")
+    return not (isinstance(children, list) and children)
+
+
+def is_rest_node(node: Any) -> bool:
+    """True for «Каникулы: Зима» rows: they have an entity but are not lessons."""
+    entity = node.get("entityInfo") or node.get("entity_info") or {}
+    if not isinstance(entity, dict):
+        return False
+    return str(entity.get("type") or "").strip().lower() in REST_TYPES
+
+
+def is_lesson_item(node: Any) -> bool:
+    """True for a child of a block that is a lesson or a nested block.
+
+    A lesson structure also contains theory/practice blocks; their
+    ``entityInfo`` carries a subject id, so they must not be mistaken for
+    lessons while a block is being expanded.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = str(node.get("type") or "").strip().lower()
+    if not kind:
+        return True  # unknown: let the caller look inside
+    if any(marker in kind for marker in ("practice", "homework", "theory", "test")):
+        return False
+    if kind in BLOCK_TYPES or any(marker in kind for marker in _BLOCK_MARKERS):
+        return True
+    if "lesson" in kind:
+        return True
+    # anything else with an entity of its own is a lesson-like row
+    entity = node.get("entityInfo") or node.get("entity_info") or {}
+    return bool(isinstance(entity, dict) and _as_int(entity.get("id")))
+
+
+def structure_node(payload: Any) -> dict[str, Any]:
+    """The node itself from a ``/structures/<id>`` response."""
+    node: Any = payload
+    for _ in range(4):
+        if not isinstance(node, dict):
+            return {}
+        for key in _STRUCTURE_KEYS:
+            value = node.get(key)
+            if isinstance(value, dict):
+                node = value
+                break
+        else:
+            return node
+    return node if isinstance(node, dict) else {}
+
+
+def structure_children(payload: Any) -> list[dict[str, Any]]:
+    """Children of a structure node — the lessons inside a ``lessons_block``."""
+    children = structure_node(payload).get("children")
+    if isinstance(children, list):
+        return [child for child in children if isinstance(child, dict)]
+    return []
+
+
 def extract_lessons(payload: Any) -> list[LessonEntry]:
     """Read lessons from ``GET /api/v3/student/education-groups/{id}``.
 

@@ -9,6 +9,7 @@ without touching the network.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -105,6 +106,99 @@ LESSON_STRUCTURES = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# A second course whose lessons are grouped into `lessons_block` nodes.
+# The list endpoint answers with `children: null`; the real lessons only appear
+# in /structures/<block id>, exactly like the shape of the live backend.
+BLOCK_COURSE_ID = 111102
+BLOCK_COURSE_TITLE = "Английский язык"
+BLOCK_DB_ID = 41892738
+BLOCK_TITLE = "III семестр"
+BLOCK_LESSON_DB_ID = 41892739
+BLOCK_LESSON_ENTITY_ID = 4771263
+BLOCK_SUBJECT_ID = 900
+BLOCK_SUBJECT_TITLE = "Домашка по блокам"
+BLOCK_KBS_ID = 601
+VACATION_ID = 41894018
+VACATION_ENTITY_ID = 4771170
+
+BLOCK_COURSE_PAYLOAD = {
+    "title": BLOCK_COURSE_TITLE,
+    "data": [
+        {
+            "id": BLOCK_DB_ID,
+            "title": BLOCK_TITLE,
+            "type": "lessons_block",
+            "sort": 1,
+            "entityInfo": None,
+            "children": None,
+        },
+        {
+            "id": VACATION_ID,
+            "title": "Каникулы: Зима",
+            "type": "lesson_entity",
+            "sort": 4,
+            "entityInfo": {
+                "id": VACATION_ENTITY_ID,
+                "title": "Каникулы: Зима",
+                "type": "vacation",
+                "sort": 57,
+                "duration": 0,
+            },
+            "children": None,
+        },
+    ],
+}
+BLOCK_COURSE_STRUCTURES = {
+    # the block itself: only here do the lessons show up
+    BLOCK_DB_ID: {
+        "data": {
+            "id": BLOCK_DB_ID,
+            "title": BLOCK_TITLE,
+            "type": "lessons_block",
+            "sort": 1,
+            "entityInfo": None,
+            "children": [
+                {
+                    "id": BLOCK_LESSON_DB_ID,
+                    "title": "Занятие 1",
+                    "type": "lesson_entity",
+                    "sort": 1,
+                    "entityInfo": {
+                        "id": BLOCK_LESSON_ENTITY_ID,
+                        "title": "Занятие 1",
+                        "type": "webinar",
+                        "sort": 1,
+                        "duration": 90,
+                    },
+                    "children": None,
+                },
+            ],
+        }
+    },
+    # a real lesson: practice blocks carry the subject ids
+    BLOCK_LESSON_DB_ID: {
+        "data": {
+            "id": BLOCK_LESSON_DB_ID,
+            "children": [
+                {"type": "curriculum_theory_block", "entityInfo": {"id": 21, "title": "Теория"}},
+                {
+                    "type": "curriculum_practice_block",
+                    "entityInfo": {"id": BLOCK_SUBJECT_ID, "title": BLOCK_SUBJECT_TITLE},
+                },
+            ],
+        }
+    },
+    # a vacation has no lessons at all — the hard-coded `children: []`
+    VACATION_ID: {"data": {"id": VACATION_ID, "title": "Каникулы: Зима", "children": []}},
+}
+
+#: course id → its list payload and structure table
+COURSES = {
+    COURSE_ID: {"payload": LESSONS_PAYLOAD, "structures": LESSON_STRUCTURES},
+    BLOCK_COURSE_ID: {"payload": BLOCK_COURSE_PAYLOAD, "structures": BLOCK_COURSE_STRUCTURES},
+}
+
 def _test(test_id: int, ttype: str, title: str, answers: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "id": test_id,
@@ -149,6 +243,15 @@ TESTS_OFFLINE = [
     ]),
 ]
 
+BLOCK_TESTS = [
+    _test(4001, "type1", "Задание из блока", [
+        {"id": 81, "variants": ["верно"], "isRightAnswer": True, "sort": 1},
+        {"id": 82, "variants": ["неверно"], "isRightAnswer": False, "sort": 2},
+    ]),
+]
+
+
+
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -185,13 +288,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": "boom"})
             return
         path = self.path.split("?")[0]
-        if path == f"/api/v3/student/education-groups/{COURSE_ID}":
+        group = re.fullmatch(r"/api/v3/student/education-groups/(\d+)", path)
+        if group and int(group.group(1)) in COURSES:
+            course = COURSES[int(group.group(1))]
             query = parse_qs(urlsplit(self.path).query)
             if "page" in query:
                 # the real backend ignores it and the client must not send it
                 self._send(400, {"error": "page is not supported; use lastKnownId"})
                 return
-            items = LESSONS_PAYLOAD["data"]
+            items = course["payload"]["data"]
             per_page = int(query.get("perPage", [str(len(items))])[0])
             start = 0
             last_known = query.get("lastKnownId", [""])[0]
@@ -200,20 +305,26 @@ class _Handler(BaseHTTPRequestHandler):
                 ids = [int(item["id"]) for item in items]
                 start = ids.index(known) + 1 if known in ids else len(items)
             batch = items[start:start + per_page]
-            payload = dict(LESSONS_PAYLOAD)
+            payload = dict(course["payload"])
             payload["data"] = batch
             payload["meta"] = {"per_page": per_page, "count": len(batch)}
             self._send(200, payload)
             return
-        if path.startswith(f"/api/v3/student/education-groups/{COURSE_ID}/structures/"):
-            lesson_id = path.rsplit("/", 1)[-1]
-            structure = LESSON_STRUCTURES.get(int(lesson_id)) if lesson_id.isdigit() else None
+        structure_path = re.fullmatch(
+            r"/api/v3/student/education-groups/(\d+)/structures/(\d+)", path
+        )
+        if structure_path and int(structure_path.group(1)) in COURSES:
+            course = COURSES[int(structure_path.group(1))]
+            structure = course["structures"].get(int(structure_path.group(2)))
             if structure is not None:
                 self._send(200, structure)
             else:
-                self._send(404, {"error": "unknown lesson"})
+                self._send(404, {"error": "unknown node"})
             return
         for subject_id, title, online in (
+            (BLOCK_SUBJECT_ID, BLOCK_SUBJECT_TITLE, [
+                {"id": BLOCK_KBS_ID, "title": "Раздел блока"},
+            ]),
             (SUBJECT_ID, SUBJECT_TITLE, [
                 {"id": KBS_ONLINE, "title": "Раздел 1"},
                 {"id": KBS_EXTRA, "title": "Раздел 2"},
@@ -232,6 +343,7 @@ class _Handler(BaseHTTPRequestHandler):
                 })
                 return
         for subject_id, kbs_id, mode, tests in (
+            (BLOCK_SUBJECT_ID, BLOCK_KBS_ID, "online", BLOCK_TESTS),
             (SUBJECT_ID, KBS_ONLINE, "online", TESTS_ONLINE),
             (SUBJECT_ID, KBS_EXTRA, "online", TESTS_EXTRA),
             (SUBJECT2_ID, KBS_OFFLINE, "offline", TESTS_OFFLINE),

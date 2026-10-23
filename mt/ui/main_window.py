@@ -1094,6 +1094,13 @@ class MainWindow(QMainWindow):
             "Синхронизировать текущий предмет, урок или домашка (F5)"
         )
         self.act_sync_all = action("Синхронизировать всё", "refresh", self.sync_all)
+        self.act_deep_sync = action(
+            "Глубокая синхронизация (всё дерево)", "layers", self.deep_sync
+        )
+        self.act_deep_sync.setToolTip(
+            "Рекурсивно обойти всю библиотеку: предметы → уроки → домашки → разделы.\n"
+            "От последнего предмета, с редкими паузами между запросами."
+        )
         self.act_stop = action("Остановить", "close", self.stop_sync)
         self.act_add_subject = action(
             "Добавить предмет по ссылке…", "plus", self.add_link_dialog, "Ctrl+N"
@@ -1148,6 +1155,7 @@ class MainWindow(QMainWindow):
         sync_menu.addAction(self.act_add_subject)
         sync_menu.addAction(self.act_sync_selected)
         sync_menu.addAction(self.act_sync_all)
+        sync_menu.addAction(self.act_deep_sync)
         sync_menu.addAction(self.act_stop)
 
         view_menu = menu.addMenu("Вид")
@@ -1584,6 +1592,20 @@ class MainWindow(QMainWindow):
         loose = [subject["id"] for subject in subjects if subject["id"] not in covered]
         self._start_sync(loose, [course["id"] for course in courses])
 
+    def deep_sync(self) -> None:
+        """Recursive walk of the whole library: предмет → урок → домашка → раздел.
+
+        The worker takes every course from the database, last one first, and
+        every homework that no course reaches.  Pauses are 1.5× the ordinary
+        ones, because a full pass touches hundreds of pages.
+        """
+        if not self._ensure_cookies():
+            return
+        if not db.list_courses() and not db.list_subjects():
+            self.add_link_dialog()
+            return
+        self._start_sync([], [], deep=True)
+
     def sync_course(self, course_id: int, *, silent: bool = False) -> None:
         """Download the whole course: lessons, practice blocks, tests."""
         if not self._ensure_cookies(silent=silent):
@@ -1635,13 +1657,19 @@ class MainWindow(QMainWindow):
         if self.sender() is self._sync:
             self._sync = None
 
-    def _start_sync(self, subject_ids: list[int], course_ids: list[int] | None = None) -> None:
+    def _start_sync(
+        self,
+        subject_ids: list[int],
+        course_ids: list[int] | None = None,
+        *,
+        deep: bool = False,
+    ) -> None:
         current = self._sync_thread()
         if current is not None and current.isRunning():
             self.toast("Синхронизация уже идёт", error=True)
             return
         self._sync_queue_results = []
-        thread = SyncThread(self.api, subject_ids, course_ids, parent=self)
+        thread = SyncThread(self.api, subject_ids, course_ids, parent=self, deep=deep)
         thread.progress.connect(self._on_sync_progress)
         thread.log.connect(self._append_log)
         thread.subject_done.connect(self._on_subject_done)
@@ -1655,9 +1683,13 @@ class MainWindow(QMainWindow):
         self.act_stop.setEnabled(True)
         self.act_sync_selected.setEnabled(False)
         self.act_sync_all.setEnabled(False)
+        self.act_deep_sync.setEnabled(False)
         self.status_label.setText("Синхронизация…")
-        targets = [f"предмет {cid}" for cid in course_ids or []]
-        targets += [f"домашка {sid}" for sid in subject_ids]
+        if deep:
+            targets = ["всё дерево: предметы → уроки → домашки → разделы"]
+        else:
+            targets = [f"предмет {cid}" for cid in course_ids or []]
+            targets += [f"домашка {sid}" for sid in subject_ids]
         self._append_log("— старт синхронизации: " + ", ".join(targets))
         thread.start()
 
@@ -1694,6 +1726,7 @@ class MainWindow(QMainWindow):
         self.act_stop.setEnabled(False)
         self.act_sync_selected.setEnabled(True)
         self.act_sync_all.setEnabled(True)
+        self.act_deep_sync.setEnabled(True)
         total_tests = sum(result.tests for result in results)
         failed_subjects = sum(1 for result in results if result.error)
         errors = sum(result.errors for result in results) + failed_subjects

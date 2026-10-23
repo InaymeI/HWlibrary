@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="синхронизировать предмет (уроки, домашки, задания) и выйти")
     parser.add_argument("--link", metavar="URL",
                         help="ссылка на предмет, урок или задание — синхронизировать и выйти")
+    parser.add_argument("--deep", action="store_true",
+                        help="рекурсивно синхронизировать всё дерево (предметы → уроки → "
+                             "домашки → разделы) и выйти")
     args = parser.parse_args(argv)
 
     if args.data_dir:
@@ -110,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_sync([link.subject_id], [])
         print("В ссылке не найдена домашка", file=sys.stderr)
         return 2
+    if args.deep:
+        return _run_sync([], [], deep=True)
     if args.course:
         return _run_sync([], [args.course])
     if args.sync:
@@ -141,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     return app.exec()
 
 
-def _run_sync(subject_ids: list[int], course_ids: list[int] | None = None) -> int:
+def _run_sync(
+    subject_ids: list[int], course_ids: list[int] | None = None, *, deep: bool = False
+) -> int:
     """Headless synchronisation, useful for cron jobs and scripts."""
     from PyQt6.QtCore import QCoreApplication, Qt
 
@@ -153,7 +160,7 @@ def _run_sync(subject_ids: list[int], course_ids: list[int] | None = None) -> in
     app = QCoreApplication(sys.argv[:1])  # noqa: F841 - needed for QThread signals
     api = Api()
 
-    thread = SyncThread(api, subject_ids, course_ids)
+    thread = SyncThread(api, subject_ids, course_ids, deep=deep)
     # No event loop runs here, so deliver signals directly from the worker.
     thread.log.connect(
         lambda line: print(line, flush=True), type=Qt.ConnectionType.DirectConnection

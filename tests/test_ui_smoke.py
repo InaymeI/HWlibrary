@@ -537,6 +537,34 @@ def test_sidebar_search_drops_a_homework_filter(app, window):
     assert db.query_tests_count(search="1001") == 1
 
 
+def test_deep_sync_action_walks_the_whole_library(app, window):
+    """The recursive sync button really walks every cached course."""
+    from mt import db
+    from tests.fake_server import (
+        BLOCK_COURSE_ID,
+        BLOCK_LESSON_DB_ID,
+        COURSE_ID,
+        LESSON_DB_ID,
+    )
+
+    window.api.set_cookies({"sessionid": "valid"})
+    db.upsert_course(COURSE_ID, "История России", {})
+    db.upsert_course(BLOCK_COURSE_ID, "Английский язык", {})
+    window.refresh()
+    app.processEvents()
+
+    assert window.act_deep_sync.isEnabled()
+    window.deep_sync()
+    app.processEvents()
+    assert window._sync is not None
+    assert not window.act_deep_sync.isEnabled()  # one walk at a time
+    _wait_sync(app, window)
+
+    assert window.act_deep_sync.isEnabled()
+    assert db.get_lesson(LESSON_DB_ID) is not None
+    assert db.get_lesson(BLOCK_LESSON_DB_ID) is not None
+
+
 def test_homework_scope_is_shown_in_the_count_label(app, window):
     page = window.all_page
     window.navigate("all")
