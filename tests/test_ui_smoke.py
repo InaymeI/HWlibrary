@@ -644,3 +644,147 @@ def test_rename_homework_survives_and_updates_page(app, window, monkeypatch):
     app.processEvents()
     assert db.get_subject(777)["title"] == "Моя домашка"
     assert window.homework_page.header.title.text() == "Моя домашка"
+def test_aero_taskbar_and_theme_roundtrip(app, window):
+    """Aero rearranges chrome without losing navigation or status updates."""
+    from PyQt6.QtWidgets import QFrame
+
+    from mt.theme import stylesheet
+
+    assert "$" not in stylesheet("aero")
+    window.navigate("homework:777")
+    for _ in range(3):
+        window.apply_theme("aero", persist=False)
+        app.processEvents()
+        assert window.theme_palette().name == "aero"
+        assert window.rail.is_horizontal
+        assert not window.statusBar().isVisible()
+        assert window.rail.orb.menu() is window.main_menu
+        assert window.rail.tray_clock.text()
+        assert window.stack.currentWidget() is window.homework_page
+        window.status_label.setText("Проверка статуса")
+        assert window.rail.tray_status.text() == "Проверка статуса"
+        assert window.rail.geometry().width() > window.rail.geometry().height()
+        window.apply_theme("light", persist=False)
+        app.processEvents()
+        assert not window.rail.is_horizontal
+        assert window.statusBar().isVisible()
+        assert window.rail.width() == 72
+        assert not window.rail.findChildren(QFrame, "railDivider")
+
+
+def test_aero_all_pages_render(app, window):
+    window.apply_theme("aero", persist=False)
+    for target in ("dash", "courses", "all", "homework:777", "kbs:501", "test:1001"):
+        window.navigate(target)
+        app.processEvents()
+        assert not window.grab().isNull()
+    assert window.theme_actions["aero"].isChecked()
+
+
+def test_aero_assets_and_icon_cache_roundtrip(app, window):
+    """Packaged assets load offline; switching clears both icon caches."""
+    import json
+
+    from PyQt6.QtGui import QIcon, QPixmap
+
+    from mt import icons
+
+    sources = json.loads((icons.ASSET_DIR / "sources.json").read_text())
+    for filename in sources["files"]:
+        path = icons.ASSET_DIR / filename
+        assert path.is_file()
+        if filename.endswith(".ico"):
+            assert not QIcon(str(path)).isNull()
+    assert not QPixmap(str(icons.ASSET_DIR / "wallpaper.jpg")).isNull()
+    window.apply_theme("light", persist=False)
+    flat = icons.pixmap("book", "#ffffff", 32).toImage()
+    window.apply_theme("aero", persist=False)
+    aero = icons.pixmap("book", "#ffffff", 32).toImage()
+    assert aero != flat
+    assert window.aero_caption.isVisible()
+    window.apply_theme("light", persist=False)
+    assert not window.aero_caption.isVisible()
+    assert icons.pixmap("book", "#ffffff", 32).toImage() == flat
+
+
+def test_aero_typography_and_density_restore(app, window):
+    """The period font stack and compact metrics must not leak into flat themes."""
+    from PyQt6.QtWidgets import QFrame
+
+    from mt.theme import stylesheet
+
+    assert 'font-family: "Segoe UI", "Tahoma"' in stylesheet("aero")
+    window.apply_theme("light", persist=False)
+    header = window.homework_page.findChild(QFrame, "pageHeader")
+    original = header.layout().contentsMargins()
+    window.apply_theme("aero", persist=False)
+    app.processEvents()
+    assert header.layout().contentsMargins().top() <= 12
+    assert window.sidebar._nav_rows["dash"].height() == 30
+    delegate = window.sidebar.tree.itemDelegate()
+    assert delegate._row_height == 28
+    window.navigate("homework:777")
+    app.processEvents()
+    window.apply_theme("light", persist=False)
+    app.processEvents()
+    assert header.layout().contentsMargins() == original
+    assert window.sidebar._nav_rows["dash"].height() == 44
+    assert delegate._row_height == 40
+
+
+def test_vista_assets_and_labeled_taskbar(app, window):
+    import json
+
+    from mt import icons
+
+    manifest = json.loads((icons.ASSET_DIR / "sources.json").read_text())
+    assert all("Windows Vista/" in path for path in manifest["files"].values())
+    window.apply_theme("aero", persist=False)
+    app.processEvents()
+    for button in window.rail._nav.values():
+        assert button.text()
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+    assert window.theme_actions["aero"].text() == "Windows Vista Aero"
+    window.resize(1024, 640)
+    app.processEvents()
+    assert window.rail.settings_button.geometry().right() <= window.rail.width()
+    window.apply_theme("light", persist=False)
+    app.processEvents()
+    for button in window.rail._nav.values():
+        assert button.width() == 46
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_one_course_sync_populates_homework_tasks_without_manual_sync(app, window, monkeypatch, deep):
+    """One UI action downloads task payloads and the homework page reads SQLite."""
+    from mt import db
+    from tests.fake_server import COURSE_ID
+
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM tests")
+    db.upsert_course(COURSE_ID, "История России", {})
+    window.refresh()
+    assert db.overall_stats()["total"] == 0
+    original = window.api.get_curriculum_subject
+    calls = []
+
+    def fetch(sid):
+        calls.append(sid)
+        return original(sid)
+
+    monkeypatch.setattr(window.api, "get_curriculum_subject", fetch)
+    window._start_sync([], [COURSE_ID], deep=deep)
+    _wait_sync(app, window)
+    assert window._sync_thread() is None
+    assert db.overall_stats()["total"] == 7
+    assert calls.count(777) == 1
+    assert calls.count(888) == 1
+    window.navigate("homework:777")
+    app.processEvents()
+    assert window.homework_page.chip_count() == 6
+    window.navigate("homework:888")
+    app.processEvents()
+    assert window.homework_page.chip_count() == 1
+    db.close()
+    assert db.get_test(1001)["payload_json"]

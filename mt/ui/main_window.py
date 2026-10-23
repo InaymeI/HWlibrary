@@ -11,6 +11,7 @@ from typing import Any
 
 from PyQt6 import sip
 from PyQt6.QtCore import (
+    QDateTime,
     QModelIndex,
     QPoint,
     QPointF,
@@ -35,12 +36,15 @@ from PyQt6.QtGui import (
     QKeySequence,
     QLinearGradient,
     QPainter,
+    QPainterPath,
+    QPen,
     QPixmap,
     QRadialGradient,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QBoxLayout,
     QDockWidget,
     QFileDialog,
     QFrame,
@@ -74,7 +78,7 @@ from ..models import TestDetails, clear_cache, lesson_meta
 from ..sync import SyncResult, SyncThread
 from ..theme import PALETTES, Palette, stylesheet
 from ..theme import palette as get_palette
-from ..widgets import ICONS, Badge, label, paint_color, paint_glass
+from ..widgets import ICONS, Badge, label, paint_color, paint_glass, repolish
 from .dialogs import (
     CookieDialog,
     HelpDialog,
@@ -97,6 +101,16 @@ from .pages import (
 APP_ICON = "book"
 ICON_COLOR = "#59616e"
 COUNT_ROLE = Qt.ItemDataRole.UserRole + 7
+
+
+class StatusLabel(QLabel):
+    """Status text that announces changes so the taskbar tray can mirror it."""
+
+    textChanged = pyqtSignal(str)  # noqa: N815 - Qt naming
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        super().setText(text)
+        self.textChanged.emit(text)
 
 
 class SidebarTree(QTreeWidget):
@@ -229,12 +243,14 @@ class SidebarDelegate(QStyledItemDelegate):
         self._secondary = "#3d3d40"
         self._muted = "#5e5e62"
         self._chip = "rgba(255, 255, 255, 0.30)"
+        self._row_height = SidebarTree.ROW_HEIGHT
 
     def set_palette(self, palette: Palette) -> None:
         self._text = palette.text
         self._secondary = palette.text_secondary
         self._muted = palette.muted
         self._chip = palette.selection
+        self._row_height = 28 if palette.name == "aero" else SidebarTree.ROW_HEIGHT
         self._tree.viewport().update()
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
@@ -288,7 +304,7 @@ class SidebarDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
-        return QSize(0, SidebarTree.ROW_HEIGHT)
+        return QSize(0, self._row_height)
 
 
 
@@ -312,6 +328,7 @@ class NavRow(QToolButton):
 
     def set_palette(self, palette: Palette) -> None:
         self._palette = palette
+        self.setFixedHeight(30 if palette.name == "aero" else 44)
         self._refresh_icon()
         self.update()
 
@@ -742,32 +759,135 @@ RAIL_ICON_ACTIVE = "#ffffff"
 
 
 class Shell(QWidget):
-    """Canvas the panels float on: flat grey plus a soft corner vignette.
+    """Canvas the panels float on.
 
-    The reference design lights the middle of the window and lets the corners
-    fall into shade, so the grey panels read as sheets of glass lying on top.
+    Flat themes get a grey sheet with a soft corner vignette; the Frutiger Aero
+    theme replaces it with a bright sky: a deep-blue top, a pale cyan horizon,
+    a sun haze and a few glossy bubbles — the 2007–2009 wallpaper look.  Panels
+    are painted by the stylesheet, so only their shadows live here.
     """
 
     DEPTH = 22
 
+    #: Bubbles of the Aero canvas: (x, y, radius) as fractions of the widget.
+    BUBBLES = (
+        (0.90, 0.10, 0.075),
+        (0.96, 0.30, 0.042),
+        (0.74, 0.05, 0.030),
+        (0.10, 0.66, 0.105),
+        (0.04, 0.40, 0.048),
+        (0.32, 0.94, 0.062),
+        (0.62, 0.90, 0.034),
+    )
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._palette: Palette = PALETTES["light"]
-        self._panels: list[QRectF] = []
+        self._panels: list[tuple[QRectF, float]] = []
+        self._wallpaper = QPixmap(str(icons.ASSET_DIR / "wallpaper.jpg"))
 
     def set_palette(self, palette: Palette) -> None:
         self._palette = palette
         self.update()
 
-    def set_panels(self, panels: list[QRectF]) -> None:
-        """Rects of the floating panels; the canvas paints their shadows."""
-        self._panels = panels
+    def set_panels(self, panels) -> None:
+        """Rects of the floating panels; the canvas paints their shadows.
+
+        Accepts plain rects (radius 26) or ``(rect, radius)`` pairs — the
+        Aero taskbar is squarer than the tall side panels.
+        """
+        normalized: list[tuple[QRectF, float]] = []
+        for item in panels:
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                normalized.append((QRectF(item[0]), float(item[1])))
+            else:
+                normalized.append((QRectF(item), 26.0))
+        self._panels = normalized
         self.update()
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(self.rect())
+    # ------------------------------------------------------------------ #
+    def _paint_sky(self, painter: QPainter, rect: QRectF) -> None:
+        """Original Windows Vista wallpaper, cropped to fill without distortion."""
+        if not self._wallpaper.isNull():
+            image = self._wallpaper
+            scale = max(rect.width() / image.width(), rect.height() / image.height())
+            width, height = rect.width() / scale, rect.height() / scale
+            source = QRectF((image.width() - width) / 2, (image.height() - height) / 2,
+                            width, height)
+            painter.drawPixmap(rect, image, source)
+            return
+        pal = self._palette
+        sky = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        sky.setColorAt(0.0, paint_color(pal.sky_top))
+        sky.setColorAt(0.45, paint_color(pal.sky_mid))
+        sky.setColorAt(0.80, paint_color(pal.sky_bottom))
+        sky.setColorAt(1.0, paint_color(pal.sky_bottom))
+        painter.fillRect(rect, sky)
+
+        haze_center = QPointF(rect.width() * 0.24, -rect.height() * 0.10)
+        haze = QRadialGradient(haze_center, max(rect.height() * 0.95, 160.0))
+        glow = paint_color(pal.sky_glow)
+        clear = QColor(glow)
+        clear.setAlphaF(0.0)
+        haze.setColorAt(0.0, glow)
+        haze.setColorAt(0.55, QColor(glow.red(), glow.green(), glow.blue(),
+                                    int(glow.alpha() * 0.35)))
+        haze.setColorAt(1.0, clear)
+        painter.fillRect(rect, haze)
+
+        for fx, fy, fr in self.BUBBLES:
+            self._paint_bubble(painter, rect, fx, fy, fr)
+
+        # a cool green glow along the bottom edge (grass / water)
+        ground = QLinearGradient(
+            QPointF(0, rect.height() * 0.80), QPointF(0, rect.height())
+        )
+        grass = QColor(70, 190, 150, 46)
+        grass_end = QColor(70, 190, 150, 0)
+        ground.setColorAt(0.0, grass_end)
+        ground.setColorAt(1.0, grass)
+        painter.fillRect(
+            QRectF(0, rect.height() * 0.80, rect.width(), rect.height() * 0.20), ground
+        )
+
+    def _paint_bubble(
+        self, painter: QPainter, rect: QRectF, fx: float, fy: float, fr: float
+    ) -> None:
+        pal = self._palette
+        radius = max(8.0, min(rect.width(), rect.height()) * fr)
+        center = QPointF(rect.width() * fx, rect.height() * fy)
+        bubble_rect = QRectF(
+            center.x() - radius, center.y() - radius, radius * 2, radius * 2
+        )
+        fill = paint_color(pal.bubble)
+        body = QRadialGradient(
+            QPointF(center.x() - radius * 0.35, center.y() - radius * 0.40),
+            radius * 1.25,
+        )
+        body.setColorAt(0.0, QColor(255, 255, 255, min(255, fill.alpha() + 90)))
+        body.setColorAt(0.55, fill)
+        body.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(body)
+        painter.drawEllipse(bubble_rect)
+
+        rim = paint_color(pal.bubble_rim)
+        rim = QColor(rim.red(), rim.green(), rim.blue(), int(rim.alpha() * 0.8))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(rim, max(1.0, radius * 0.035)))
+        painter.drawEllipse(bubble_rect.adjusted(1, 1, -1, -1))
+
+        # specular dot, top-left, like every 2009 orb
+        gloss = QColor(255, 255, 255, min(255, int(rim.alpha() * 1.2)))
+        painter.setBrush(gloss)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(
+            QPointF(center.x() - radius * 0.34, center.y() - radius * 0.42),
+            radius * 0.20,
+            radius * 0.14,
+        )
+
+    def _paint_flat(self, painter: QPainter, rect: QRectF) -> None:
         painter.fillRect(rect, paint_color(self._palette.bg))
 
         center = QPointF(rect.width() * 0.46, rect.height() * 0.40)
@@ -785,14 +905,23 @@ class Shell(QWidget):
         vignette.setColorAt(0.55, clear)
         vignette.setColorAt(1.0, shade)
         painter.fillRect(rect, vignette)
-        for panel in self._panels:
-            self._paint_shadow(painter, panel)
 
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+        if self._palette.sky_top:
+            self._paint_sky(painter, rect)
+        else:
+            self._paint_flat(painter, rect)
+        for panel, radius in self._panels:
+            self._paint_shadow(painter, panel, radius)
 
-    def _paint_shadow(self, painter: QPainter, panel: QRectF) -> None:
+    def _paint_shadow(
+        self, painter: QPainter, panel: QRectF, radius: float = 26.0
+    ) -> None:
         """Soft shadow under one panel: four gradient bands plus corners."""
         depth = float(self.DEPTH)
-        radius = 26.0
         edge = paint_color(self._palette.rail_shadow)
         edge.setAlphaF(min(1.0, edge.alphaF() * 0.55))
         clear = QColor(edge)
@@ -858,8 +987,60 @@ class RailShadow(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._color = QColor(0, 0, 0, 56)
+        self._horizontal = False
         self.setFixedWidth(self.WIDTH)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_horizontal(self, horizontal: bool) -> None:
+        """Under the rail (flat themes) or above the taskbar (Aero)."""
+        self._horizontal = bool(horizontal)
+        if self._horizontal:
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+            self.setFixedHeight(self.WIDTH)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        else:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+            self.setFixedWidth(self.WIDTH)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.update()
+
+    def _band_gradient(self, size: QSize) -> QLinearGradient:
+        """Gradient perpendicular to the rail edge, strongest at the edge."""
+        if self._horizontal:
+            gradient = QLinearGradient(0.0, 0.0, 0.0, float(size.height()))
+            gradient.setColorAt(0.0, self._faded(0.0))
+            gradient.setColorAt(0.65, self._faded(0.45))
+            gradient.setColorAt(1.0, QColor(self._color))
+        else:
+            gradient = QLinearGradient(0.0, 0.0, float(size.width()), 0.0)
+            gradient.setColorAt(0.0, QColor(self._color))
+            gradient.setColorAt(0.35, self._faded(0.45))
+            gradient.setColorAt(1.0, self._faded(0.0))
+        return gradient
+
+    def _mask_gradient(self, size: QSize) -> QLinearGradient:
+        """Fades the band out at the rounded ends of the rail."""
+        visible = QColor(0, 0, 0, 255)
+        hidden = QColor(0, 0, 0, 0)
+        length = max(1, size.width() if self._horizontal else size.height())
+        near = min(0.5, self.RADIUS / length)
+        far = max(0.5, 1.0 - self.RADIUS / length)
+        if self._horizontal:
+            gradient = QLinearGradient(0.0, 0.0, float(size.width()), 0.0)
+        else:
+            gradient = QLinearGradient(0.0, 0.0, 0.0, float(size.height()))
+        gradient.setColorAt(0.0, hidden)
+        gradient.setColorAt(near, visible)
+        gradient.setColorAt(far, visible)
+        gradient.setColorAt(1.0, hidden)
+        return gradient
+
+    def _faded(self, factor: float) -> QColor:
+        color = QColor(self._color)
+        color.setAlphaF(self._color.alphaF() * factor)
+        return color
 
     def set_theme(self, palette: Palette) -> None:
         self._color = paint_color(palette.rail_shadow)
@@ -877,16 +1058,7 @@ class RailShadow(QWidget):
         painter = QPainter(band)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        horizontal = QLinearGradient(0.0, 0.0, float(size.width()), 0.0)
-        start = QColor(self._color)
-        middle = QColor(self._color)
-        middle.setAlphaF(self._color.alphaF() * 0.45)
-        end = QColor(self._color)
-        end.setAlphaF(0.0)
-        horizontal.setColorAt(0.0, start)
-        horizontal.setColorAt(0.35, middle)
-        horizontal.setColorAt(1.0, end)
-        painter.setBrush(horizontal)
+        painter.setBrush(self._band_gradient(size))
         painter.drawRect(self.rect())
         painter.end()
 
@@ -897,14 +1069,7 @@ class RailShadow(QWidget):
         painter = QPainter(mask)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        vertical = QLinearGradient(0.0, 0.0, 0.0, float(size.height()))
-        visible = QColor(0, 0, 0, 255)
-        hidden = QColor(0, 0, 0, 0)
-        vertical.setColorAt(0.0, hidden)
-        vertical.setColorAt(min(0.5, self.RADIUS / max(1, size.height())), visible)
-        vertical.setColorAt(max(0.5, 1.0 - self.RADIUS / max(1, size.height())), visible)
-        vertical.setColorAt(1.0, hidden)
-        painter.setBrush(vertical)
+        painter.setBrush(self._mask_gradient(size))
         painter.drawRect(self.rect())
         painter.end()
 
@@ -917,8 +1082,89 @@ class RailShadow(QWidget):
         painter.drawPixmap(0, 0, band)
 
 
+class StartOrb(QToolButton):
+    """The round, glossy «Пуск» orb of the Aero taskbar.
+
+    Windows Vista put a bright sphere in the corner instead of a word; this is the
+    same idea painted by hand: a radial blue body, a white specular cap, a
+    hairline rim and the app glyph in the middle.
+    """
+
+    SIZE = 46
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("startOrb")
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Пуск — меню приложения")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        box = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+
+        # outer glow
+        glow = QRadialGradient(box.center(), box.width() * 0.62)
+        glow.setColorAt(0.0, QColor(120, 205, 245, 90))
+        glow.setColorAt(1.0, QColor(120, 205, 245, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(box.adjusted(-2, -2, 2, 2))
+
+        path = QPainterPath()
+        path.addEllipse(box)
+        body = QRadialGradient(
+            QPointF(box.center().x(), box.top() + box.height() * 0.28),
+            box.width() * 0.85,
+        )
+        pressed = self.isDown()
+        body.setColorAt(0.0, QColor("#bfeaff" if not pressed else "#8fd0f0"))
+        body.setColorAt(0.45, QColor("#4aa8e4" if not pressed else "#2f8fd0"))
+        body.setColorAt(1.0, QColor("#0b4d80" if not pressed else "#083b64"))
+        painter.setBrush(body)
+        painter.drawPath(path)
+
+        # glossy cap across the top half
+        painter.save()
+        painter.setClipPath(path)
+        cap = QLinearGradient(box.topLeft(), QPointF(box.left(), box.center().y()))
+        white = QColor(255, 255, 255, 210)
+        clear = QColor(255, 255, 255, 0)
+        cap.setColorAt(0.0, white)
+        cap.setColorAt(0.75, QColor(255, 255, 255, 70))
+        cap.setColorAt(1.0, clear)
+        painter.setBrush(cap)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(
+            QRectF(box.left() + 3, box.top() + 2, box.width() - 6, box.height() * 0.48)
+        )
+        painter.restore()
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 1.2))
+        painter.drawEllipse(box)
+
+        icon = icons.icon("grid", "#ffffff", 26)
+        icon.paint(
+            painter,
+            QRect(
+                int(box.center().x() - 11),
+                int(box.center().y() - 11),
+                22,
+                22,
+            ),
+        )
+
+
 class Rail(QFrame):
-    """Slim dark icon rail — the only permanent navigation chrome."""
+    """Navigation chrome: a tall dark rail, or a Windows Vista taskbar.
+
+    The same buttons live in one widget and only their arrangement changes:
+    ``set_horizontal(True)`` turns the rail into the bottom glass taskbar of
+    the Frutiger Aero theme (start orb, superbar tiles, tray), and back.
+    """
 
     navigate = pyqtSignal(str)
 
@@ -926,12 +1172,15 @@ class Rail(QFrame):
         super().__init__()
         self.main = main
         self.setObjectName("rail")
-        self.setFixedWidth(72)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(13, 16, 13, 16)
-        layout.setSpacing(4)
+        self._horizontal = False
         self._nav: dict[str, QToolButton] = {}
         self._bound: list[tuple[QToolButton, QAction, str]] = []
+        self._all_buttons: list[QToolButton] = []
+        self._dividers: list[QFrame] = []
+
+        self.orb = StartOrb()
+        self.orb.clicked.connect(lambda: self.navigate.emit("dash"))
+        self.orb.hide()
 
         self.logo = QToolButton()
         self.logo.setObjectName("railLogo")
@@ -941,23 +1190,15 @@ class Rail(QFrame):
         self.logo.setToolTip(config.APP_TITLE)
         self.logo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.logo.clicked.connect(lambda: self.navigate.emit("dash"))
-        layout.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(10)
 
-        layout.addWidget(self._nav_button("grid", "dash", "Обзор"))
-        layout.addWidget(self._nav_button("book", "courses", "Предметы"))
-        layout.addWidget(self._nav_button("layers", "all", "Все тесты"))
-        layout.addSpacing(8)
-        layout.addWidget(self._action_button(main.act_back, "arrow-left"))
-        layout.addWidget(self._action_button(main.act_forward, "chevron-right"))
-        layout.addStretch(1)
-
+        self.dash_button = self._nav_button("grid", "dash", "Обзор")
+        self.courses_button = self._nav_button("book", "courses", "Предметы")
+        self.all_button = self._nav_button("layers", "all", "Все тесты")
+        self.back_button = self._action_button(main.act_back, "arrow-left")
+        self.forward_button = self._action_button(main.act_forward, "chevron-right")
         self.sync_button = self._action_button(main.act_sync_selected, "refresh")
-        layout.addWidget(self.sync_button)
-
-        layout.addWidget(self._action_button(main.act_add_subject, "plus"))
+        self.add_button = self._action_button(main.act_add_subject, "plus")
         self.cookie_button = self._action_button(main.act_cookies, "key")
-        layout.addWidget(self.cookie_button)
 
         self.theme_button = QToolButton()
         self.theme_button.setObjectName("railButton")
@@ -967,7 +1208,7 @@ class Rail(QFrame):
         self.theme_button.setToolTip("Переключить тему")
         self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.theme_button.clicked.connect(main.toggle_theme)
-        layout.addWidget(self.theme_button)
+        self._all_buttons.append(self.theme_button)
 
         self.settings_button = QToolButton()
         self.settings_button.setObjectName("railButton")
@@ -977,7 +1218,145 @@ class Rail(QFrame):
         self.settings_button.setToolTip("Настройки и журнал")
         self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        layout.addWidget(self.settings_button)
+        self._all_buttons.append(self.settings_button)
+
+        #: Right side of the taskbar: status text, clock, progress.
+        self.tray = QWidget()
+        self.tray.setObjectName("railTray")
+        self.tray_layout = QHBoxLayout(self.tray)
+        self.tray_layout.setContentsMargins(4, 0, 4, 0)
+        self.tray_layout.setSpacing(10)
+
+        self.tray_status = QLabel("Готово")
+        self.tray_status.setObjectName("trayStatus")
+        self.tray_status.setMaximumWidth(430)
+        self.tray_clock = QLabel()
+        self.tray_clock.setObjectName("trayClock")
+        self.tray_clock.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.tray_layout.addWidget(self.tray_status)
+        self.tray_layout.addWidget(self.tray_clock)
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(15_000)
+        self._clock_timer.timeout.connect(self.update_clock)
+        self._clock_timer.start()
+        self.update_clock()
+
+        self._box = QBoxLayout(QBoxLayout.Direction.TopToBottom, self)
+        self._build_layout()
+
+    # ------------------------------------------------------------------ #
+    def update_clock(self) -> None:
+        now = QDateTime.currentDateTime()
+        self.tray_clock.setText(
+            f"{now.toString('HH:mm')}\n{now.toString('dd.MM.yyyy')}"
+        )
+
+    @property
+    def is_horizontal(self) -> bool:
+        return self._horizontal
+
+    def set_horizontal(self, horizontal: bool) -> None:
+        """Turn the rail into the Aero taskbar (or back). Idempotent."""
+        horizontal = bool(horizontal)
+        if horizontal == self._horizontal:
+            return
+        self._horizontal = horizontal
+        self._build_layout()
+
+    def _divider(self) -> QFrame:
+        line = QFrame()
+        line.setObjectName("railDivider")
+        if self._horizontal:
+            line.setFixedSize(1, 26)
+        else:
+            line.setFixedHeight(1)
+            line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._dividers.append(line)
+        return line
+
+    def _build_layout(self) -> None:
+        box = self._box
+        while box.count():
+            box.takeAt(0)
+        for divider in self._dividers:
+            divider.hide()
+            divider.setParent(None)
+            divider.deleteLater()
+        self._dividers.clear()
+        horizontal = self._horizontal
+        box.setDirection(
+            QBoxLayout.Direction.LeftToRight if horizontal
+            else QBoxLayout.Direction.TopToBottom
+        )
+        self.setProperty("chrome", "taskbar" if horizontal else "rail")
+        repolish(self)
+
+        if horizontal:
+            self.setFixedHeight(54)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            box.setContentsMargins(8, 6, 10, 6)
+            box.setSpacing(4)
+            box.addWidget(self.orb, 0, Qt.AlignmentFlag.AlignVCenter)
+            box.addSpacing(4)
+            box.addWidget(self._divider(), 0, Qt.AlignmentFlag.AlignVCenter)
+            box.addWidget(self.dash_button)
+            box.addWidget(self.courses_button)
+            box.addWidget(self.all_button)
+            box.addWidget(self._divider(), 0, Qt.AlignmentFlag.AlignVCenter)
+            box.addWidget(self.back_button)
+            box.addWidget(self.forward_button)
+            box.addSpacing(6)
+            box.addWidget(self.sync_button)
+            box.addWidget(self.add_button)
+            box.addWidget(self.cookie_button)
+            box.addStretch(1)
+            box.addWidget(self.tray, 0, Qt.AlignmentFlag.AlignVCenter)
+            box.addSpacing(2)
+            box.addWidget(self._divider(), 0, Qt.AlignmentFlag.AlignVCenter)
+            box.addWidget(self.theme_button)
+            box.addWidget(self.settings_button)
+            self.tray.show()
+            self.logo.hide()
+            self.orb.show()
+        else:
+            self.setFixedWidth(72)
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+            box.setContentsMargins(13, 16, 13, 16)
+            box.setSpacing(4)
+            box.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignHCenter)
+            box.addSpacing(10)
+            box.addWidget(self.dash_button)
+            box.addWidget(self.courses_button)
+            box.addWidget(self.all_button)
+            box.addSpacing(8)
+            box.addWidget(self.back_button)
+            box.addWidget(self.forward_button)
+            box.addStretch(1)
+            box.addWidget(self.sync_button)
+            box.addWidget(self.add_button)
+            box.addWidget(self.cookie_button)
+            box.addWidget(self.theme_button)
+            box.addWidget(self.settings_button)
+            self.tray.hide()
+            self.orb.hide()
+            self.logo.show()
+
+        for key, button in self._nav.items():
+            button.setText({"dash": "Обзор", "courses": "Предметы", "all": "Задания"}[key])
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextBesideIcon if horizontal
+                else Qt.ToolButtonStyle.ToolButtonIconOnly
+            )
+            button.setFixedSize(108 if horizontal else 46, 38 if horizontal else 46)
+        for button in self._all_buttons:
+            button.setProperty("chrome", "taskbar" if horizontal else "rail")
+            repolish(button)
 
     # ------------------------------------------------------------------ #
     def _nav_button(self, icon_name: str, key: str, tooltip: str) -> QToolButton:
@@ -991,6 +1370,7 @@ class Rail(QFrame):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(lambda _checked=False, page=key: self.navigate.emit(page))
         self._nav[key] = button
+        self._all_buttons.append(button)
         return button
 
     def _action_button(self, action: QAction, icon_name: str) -> QToolButton:
@@ -1007,6 +1387,7 @@ class Rail(QFrame):
             lambda act=action, btn=button: btn.setEnabled(act.isEnabled())
         )
         self._bound.append((button, action, icon_name))
+        self._all_buttons.append(button)
         return button
 
     def set_active(self, page: str) -> None:
@@ -1016,20 +1397,29 @@ class Rail(QFrame):
         for key, button in self._nav.items():
             button.setChecked(key == active)
             color = RAIL_ICON_ACTIVE if key == active else RAIL_ICON_IDLE
-            button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
+            button.setIcon(icons.icon(_NAV_ICONS[key], color, 30 if self._horizontal else 20))
 
-    def restyle(self, dark: bool) -> None:
-        """Keep the rail legible: it stays dark in both themes."""
+    def restyle(self, theme: str) -> None:
+        """Keep the rail legible: it stays dark in every theme."""
+        self.update_clock()
+        for button in self._all_buttons:
+            button.setIconSize(QSize(22, 22) if theme == "aero" else QSize(21, 21))
         for button, _action, icon_name in self._bound:
-            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 21))
+            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 30 if theme == "aero" else 21))
         for key, button in self._nav.items():
             active = button.isChecked()
             color = RAIL_ICON_ACTIVE if active else RAIL_ICON_IDLE
-            button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
+            button.setIcon(icons.icon(_NAV_ICONS[key], color, 30 if self._horizontal else 20))
         self.theme_button.setIcon(
-            icons.icon("sun" if dark else "moon", RAIL_ICON_IDLE, 21)
+            icons.icon("sun" if theme in ("dark", "aero") else "moon", RAIL_ICON_IDLE, 21)
         )
-        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 21))
+        self.theme_button.setToolTip(
+            {
+                "aero": "Вернуть светлую тему",
+                "dark": "Windows Vista Aero",
+            }.get(theme, "Тёмная тема")
+        )
+        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 30 if theme == "aero" else 21))
 
 
 _NAV_ICONS = {"dash": "grid", "courses": "book", "all": "layers"}
@@ -1127,7 +1517,12 @@ class MainWindow(QMainWindow):
         self.theme_group = QActionGroup(self)
         self.theme_group.setExclusive(True)
         self.theme_actions: dict[str, QAction] = {}
-        for name, title in (("light", "Светлая"), ("dark", "Тёмная"), ("system", "Как в системе")):
+        for name, title in (
+            ("light", "Светлая"),
+            ("dark", "Тёмная"),
+            ("aero", "Windows Vista Aero"),
+            ("system", "Как в системе"),
+        ):
             act = QAction(title, self, checkable=True)
             act.setChecked(name == self._stored_theme_name())
             act.triggered.connect(lambda _checked, key=name: self.apply_theme(key))
@@ -1186,21 +1581,38 @@ class MainWindow(QMainWindow):
         self.shell = Shell()
         self.shell.setObjectName("shell")
         shell = self.shell
-        outer = QHBoxLayout(shell)
-        outer.setContentsMargins(18, 18, 18, 4)
-        outer.setSpacing(12)
+        self._chrome_aero: bool | None = None
+        #: Vertical stack of the window: body on top, taskbar at the bottom.
+        self.root_layout = QVBoxLayout(shell)
+        self.root_layout.setContentsMargins(18, 18, 18, 4)
+        self.root_layout.setSpacing(10)
+        self.aero_caption = QLabel("MaximumTest Library — Windows Vista Aero")
+        self.aero_caption.setObjectName("aeroCaption")
+        self.aero_caption.setContentsMargins(12, 5, 12, 5)
+        self.aero_caption.setFixedHeight(34)
+        self.aero_caption.hide()
+        self.root_layout.addWidget(self.aero_caption)
+
+        #: The body holds the rail and the two glass panels side by side.
+        self.body = QWidget()
+        self.body_layout = QHBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(12)
 
         self.rail = Rail(self)
         self.rail.navigate.connect(self.navigate)
         self.rail.settings_button.setMenu(self.main_menu)
-        rail_holder = QWidget()
-        rail_layout = QHBoxLayout(rail_holder)
-        rail_layout.setContentsMargins(0, 0, 0, 0)
-        rail_layout.setSpacing(0)
-        rail_layout.addWidget(self.rail, 0)
-        self.rail_shadow = RailShadow(rail_holder)
-        rail_layout.addWidget(self.rail_shadow, 0)
-        outer.addWidget(rail_holder, 0)
+        self.rail.orb.setMenu(self.main_menu)
+        self.rail_holder = QWidget()
+        self.rail_holder_layout = QBoxLayout(
+            QBoxLayout.Direction.LeftToRight, self.rail_holder
+        )
+        self.rail_holder_layout.setContentsMargins(0, 0, 0, 0)
+        self.rail_holder_layout.setSpacing(0)
+        self.rail_holder_layout.addWidget(self.rail, 0)
+        self.rail_shadow = RailShadow(self.rail_holder)
+        self.rail_holder_layout.addWidget(self.rail_shadow, 0)
+        self.body_layout.addWidget(self.rail_holder, 0)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("mainSplitter")
@@ -1245,7 +1657,8 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([300, 1040])
         self.splitter.splitterMoved.connect(lambda *_: self._update_canvas())
-        outer.addWidget(self.splitter, 1)
+        self.body_layout.addWidget(self.splitter, 1)
+        self.root_layout.addWidget(self.body, 1)
         self.setCentralWidget(shell)
 
         self.log_dock = QDockWidget("Журнал", self)
@@ -1279,7 +1692,8 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         status = QStatusBar()
         self.setStatusBar(status)
-        self.status_label = QLabel("Готово")
+        self.status_label = StatusLabel("Готово")
+        self.status_label.textChanged.connect(self.rail.tray_status.setText)
         status.addWidget(self.status_label, 1)
         self.db_label = QLabel()
         status.addPermanentWidget(self.db_label)
@@ -1322,7 +1736,88 @@ class MainWindow(QMainWindow):
     # theme
     # ------------------------------------------------------------------ #
     def toggle_theme(self) -> None:
-        self.apply_theme("light" if self._pal.name == "dark" else "dark")
+        """Cycle light → dark → Frutiger Aero → light."""
+        order = ("light", "dark", "aero")
+        current = self._pal.name if self._pal.name in order else "light"
+        self.apply_theme(order[(order.index(current) + 1) % len(order)])
+
+    def _apply_chrome(self) -> None:
+        """Lay the window out for the current theme.
+
+        Flat themes get the tall rail on the left and a status bar; Frutiger
+        Aero moves the same buttons into a Windows Vista taskbar at the bottom of
+        the window, hides the status bar and shows the tray (status, clock,
+        progress) instead.
+        """
+        aero = self._pal.name == "aero"
+        if aero == self._chrome_aero:
+            return
+        self._chrome_aero = aero
+        self.aero_caption.setVisible(aero)
+        self.rail.set_horizontal(aero)
+        self.rail_shadow.set_horizontal(aero)
+
+        for layout in (self.root_layout, self.body_layout):
+            layout.removeWidget(self.rail_holder)
+        holder = self.rail_holder_layout
+        while holder.count():
+            holder.takeAt(0)
+        if aero:
+            holder.setDirection(QBoxLayout.Direction.TopToBottom)
+            holder.addWidget(self.rail_shadow, 0)
+            holder.addWidget(self.rail, 0)
+            self.rail_holder.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            self.root_layout.addWidget(self.rail_holder, 0)
+            self.root_layout.setContentsMargins(10, 0, 10, 0)
+            self.root_layout.setSpacing(3)
+        else:
+            holder.setDirection(QBoxLayout.Direction.LeftToRight)
+            holder.addWidget(self.rail, 0)
+            holder.addWidget(self.rail_shadow, 0)
+            self.rail_holder.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+            )
+            self.body_layout.insertWidget(0, self.rail_holder, 0)
+            self.root_layout.setContentsMargins(18, 18, 18, 4)
+            self.root_layout.setSpacing(10)
+
+        status = self.statusBar()
+        if status is not None:
+            if aero:
+                status.removeWidget(self.progress)
+                self.progress.setFixedSize(150, 10)
+                self.rail.tray_layout.insertWidget(0, self.progress)
+                status.setVisible(False)
+            else:
+                self.rail.tray_layout.removeWidget(self.progress)
+                self.progress.setFixedSize(220, 12)
+                status.addPermanentWidget(self.progress)
+                status.setVisible(True)
+        self.rail_holder.updateGeometry()
+        self.body.updateGeometry()
+        self._update_canvas()
+
+    def _apply_density(self) -> None:
+        aero = self._pal.name == "aero"
+        for frame in self.stack.findChildren(QFrame):
+            if frame.objectName() not in ("card", "cardFlat", "pageHeader"):
+                continue
+            layout = frame.layout()
+            if layout is None:
+                continue
+            if not hasattr(frame, "_original_metrics"):
+                m = layout.contentsMargins()
+                frame._original_metrics = ((m.left(), m.top(), m.right(), m.bottom()),
+                                           layout.spacing())
+            margins, spacing = frame._original_metrics
+            if aero:
+                layout.setContentsMargins(*(min(value, 12) for value in margins))
+                layout.setSpacing(min(spacing, 6))
+            else:
+                layout.setContentsMargins(*margins)
+                layout.setSpacing(spacing)
 
     def apply_theme(self, name: str, persist: bool = True) -> None:
         if name == "system":
@@ -1335,10 +1830,12 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(stylesheet(resolved))
+        icons.set_theme(resolved)
         ICONS.recolor(self._pal)
-        self.rail.restyle(dark=resolved == "dark")
+        self.rail.restyle(self._pal.name)
         self.rail_shadow.set_theme(self._pal)
         self.shell.set_palette(self._pal)
+        self._apply_chrome()
         self.dashboard_page.apply_theme(self._pal)
         self.courses_page.apply_theme(self._pal)
         self.course_page.apply_theme(self._pal)
@@ -1351,6 +1848,9 @@ class MainWindow(QMainWindow):
         if act and not act.isChecked():
             act.setChecked(True)
         self.sidebar.rebuild(self._pal)
+        # Use Explorer-like density only in Aero, retaining original metrics
+        # for the flat themes. Re-run after navigation for newly built cards.
+        self._apply_density()
         if persist:
             self.settings.setValue("ui/theme", name)
 
@@ -1370,6 +1870,7 @@ class MainWindow(QMainWindow):
         self._from_history = False
         self._update_history_buttons()
         self._open(target)
+        self._apply_density()
 
     def _current_target(self) -> str | None:
         widget = self.stack.currentWidget()
@@ -1596,7 +2097,7 @@ class MainWindow(QMainWindow):
         """Recursive walk of the whole library: предмет → урок → домашка → раздел.
 
         The worker takes every course from the database, last one first, and
-        every homework that no course reaches.  Pauses are 1.5× the ordinary
+        every known homework as a fallback. Pauses are 1.5× the ordinary
         ones, because a full pass touches hundreds of pages.
         """
         if not self._ensure_cookies():
@@ -1711,6 +2212,9 @@ class MainWindow(QMainWindow):
         if result.error:
             return
         self.sidebar.rebuild(self._pal)
+        clear_cache()
+        if self.homework_page.subject_id:
+            self.homework_page.refresh()
         if self.kbs_page.kbs_id:
             self.kbs_page.refresh()
         self.dashboard_page.refresh()
