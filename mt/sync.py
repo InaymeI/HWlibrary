@@ -189,7 +189,7 @@ class SyncThread(QThread):
                         # carry `courseTitleForModule`.
                         module_title = find_course_title(structure)
                         if module_title:
-                            db.rename_course(course_id, module_title)
+                            db.set_course_title(course_id, module_title)
                             title = module_title
                     blocks = extract_practice_blocks(structure)
                     db.set_lesson_subjects(lesson.id, [block.as_row() for block in blocks])
@@ -293,7 +293,7 @@ class SyncThread(QThread):
             if course_id is not None and db.course_title_is_generic(course_id):
                 module_title = find_course_title(base)
                 if module_title:
-                    db.rename_course(course_id, module_title)
+                    db.set_course_title(course_id, module_title)
                     self.log.emit(f"  предмет назван по courseTitleForModule: {module_title}")
             entries = [entry.as_row() for entry in extract_kbs_entries(base)]
             if not title and not entries:

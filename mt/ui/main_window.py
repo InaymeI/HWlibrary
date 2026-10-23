@@ -95,6 +95,7 @@ from .pages import (
 )
 
 APP_ICON = "book"
+ICON_COLOR = "#59616e"
 COUNT_ROLE = Qt.ItemDataRole.UserRole + 7
 
 
@@ -497,32 +498,12 @@ class Sidebar(QWidget):
         query = self.search.text().strip()
         if not query:
             return
+        # a global search must not be silently limited by a домашка picked
+        # earlier in the «Все тесты» dropdown
+        self.main.all_page.reset_filters()
         self.main.navigate("all")
         self.main.all_page.search.setText(query)
         self.main.all_page.search.setFocus()
-
-    def _rename_course(self, course_id: int) -> None:
-        """Manual name: the escape hatch when the API sends no usable title."""
-        course = db.get_course(course_id) or {}
-        title, ok = QInputDialog.getText(
-            self.main, "Название предмета", "Как называется предмет?",
-            text=course.get("title") or "",
-        )
-        title = title.strip()
-        if ok and title:
-            db.rename_course(course_id, title)
-            self.main.refresh()
-
-    def _rename_homework(self, subject_id: int) -> None:
-        homework = db.homework_row(subject_id) or {}
-        title, ok = QInputDialog.getText(
-            self.main, "Название домашки", "Как называется домашка?",
-            text=homework.get("title") or "",
-        )
-        title = title.strip()
-        if ok and title:
-            db.rename_subject(subject_id, title)
-            self.main.refresh()
 
     def _show_tree_menu(self, point) -> None:
         menu = QMenu(self)
@@ -564,7 +545,7 @@ class Sidebar(QWidget):
             subject_id = int(homework["id"])
             total = int(homework.get("total") or 0)
             supported = int(homework.get("supported") or 0)
-            item = QTreeWidgetItem([homework.get("title") or f"Домашка #{subject_id}"])
+            item = QTreeWidgetItem([db.subject_label(homework)])
             item.setData(0, Qt.ItemDataRole.UserRole, ("homework", subject_id))
             item.setData(0, COUNT_ROLE, f"{supported}/{total}" if total else "")
             item.setToolTip(
@@ -604,7 +585,7 @@ class Sidebar(QWidget):
                 "total": course.get("total") or 0,
                 "supported": course.get("supported") or 0,
             }
-            item = QTreeWidgetItem([course.get("title") or f"Предмет #{course['id']}"])
+            item = QTreeWidgetItem([db.course_label(course)])
             item.setData(0, Qt.ItemDataRole.UserRole, ("course", course["id"]))
             item.setData(0, COUNT_ROLE, f"{stats['supported']}/{stats['total']}")
             item.setToolTip(
@@ -728,31 +709,14 @@ class Sidebar(QWidget):
             self._show_tree_menu(point)
             return
         kind, item_id = data
-        menu = QMenu(self)
         if kind == "course":
-            course = db.get_course(item_id) or {}
-            menu.addAction(icons.icon("external", "#59616e", 16), "Открыть",
-                           lambda: self.navigate.emit(f"course:{item_id}"))
-            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать предмет",
-                           lambda: self.main.sync_course(item_id))
-            menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
-                           lambda: QGuiApplication.clipboard().setText(str(item_id)))
-            menu.addAction(icons.icon("book", "#59616e", 16), "Переименовать…",
-                           lambda: self._rename_course(item_id))
-            menu.addSeparator()
-            menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить предмет из кэша",
-                           lambda: self.main.delete_course(item_id))
-            menu.setToolTip(course.get("title") or "")
-        elif kind == "homework":
-            menu.addAction(icons.icon("external", "#59616e", 16), "Открыть домашку",
-                           lambda: self.navigate.emit(f"homework:{item_id}"))
-            menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать домашку",
-                           lambda: self.main.sync_subject(item_id))
-            menu.addAction(icons.icon("copy", "#59616e", 16), "Копировать ID",
-                           lambda: QGuiApplication.clipboard().setText(str(item_id)))
-            menu.addAction(icons.icon("homework", "#59616e", 16), "Переименовать…",
-                           lambda: self._rename_homework(item_id))
-        elif kind == "lesson":
+            self.main.course_menu(item_id).exec(self.tree.viewport().mapToGlobal(point))
+            return
+        if kind == "homework":
+            self.main.homework_menu(item_id).exec(self.tree.viewport().mapToGlobal(point))
+            return
+        menu = QMenu(self)
+        if kind == "lesson":
             menu.addAction(icons.icon("external", "#59616e", 16), "Открыть урок",
                            lambda: self.navigate.emit(f"lesson:{item_id}"))
             menu.addAction(icons.icon("refresh", "#59616e", 16), "Синхронизировать урок",
@@ -1782,6 +1746,74 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # actions
     # ------------------------------------------------------------------ #
+    def rename_course(self, course_id: int) -> None:
+        """Manual name for a предмет: the API often sends no name at all.
+
+        ``manual_title`` in the database keeps the typed name, so the next
+        synchronization cannot replace it with a placeholder.
+        """
+        course = db.get_course(course_id) or {}
+        current = str(course.get("title") or "")
+        title, ok = QInputDialog.getText(
+            self,
+            "Название предмета",
+            f"Как называется предмет #{course_id}?",
+            text="" if db.title_is_generic(current) else current,
+        )
+        title = title.strip()
+        if not ok or not title:
+            return
+        db.rename_course(course_id, title)
+        self.refresh()
+        self.toast(f"Предмет переименован: {title}")
+
+    def rename_homework(self, subject_id: int) -> None:
+        """Manual name for a домашка; same rules as :meth:`rename_course`."""
+        homework = db.homework_row(subject_id) or {}
+        current = str(homework.get("title") or "")
+        title, ok = QInputDialog.getText(
+            self,
+            "Название домашки",
+            f"Как называется домашка #{subject_id}?",
+            text="" if db.title_is_generic(current) else current,
+        )
+        title = title.strip()
+        if not ok or not title:
+            return
+        db.rename_subject(subject_id, title)
+        self.refresh()
+        self.toast(f"Домашка переименована: {title}")
+
+    # ------------------------------------------------------------------ #
+    def course_menu(self, course_id: int) -> QMenu:
+        """Context menu of a предмет — one implementation for every page."""
+        menu = QMenu(self)
+        menu.addAction(icons.icon("external", ICON_COLOR, 16), "Открыть",
+                       lambda: self.navigate(f"course:{course_id}"))
+        menu.addAction(icons.icon("refresh", ICON_COLOR, 16), "Синхронизировать предмет",
+                       lambda: self.sync_course(course_id))
+        menu.addAction(icons.icon("copy", ICON_COLOR, 16), "Копировать ID",
+                       lambda: QGuiApplication.clipboard().setText(str(course_id)))
+        menu.addAction(icons.icon("book", ICON_COLOR, 16), "Переименовать…",
+                       lambda: self.rename_course(course_id))
+        menu.addSeparator()
+        menu.addAction(icons.icon("trash", "#c53b3b", 16), "Удалить предмет из кэша",
+                       lambda: self.delete_course(course_id))
+        return menu
+
+    def homework_menu(self, subject_id: int) -> QMenu:
+        """Context menu of a домашка — used by the sidebar, урок and домашка."""
+        menu = QMenu(self)
+        menu.addAction(icons.icon("external", ICON_COLOR, 16), "Открыть домашку",
+                       lambda: self.navigate(f"homework:{subject_id}"))
+        menu.addAction(icons.icon("refresh", ICON_COLOR, 16), "Синхронизировать домашку",
+                       lambda: self.sync_subject(subject_id))
+        menu.addAction(icons.icon("copy", ICON_COLOR, 16), "Копировать ID",
+                       lambda: QGuiApplication.clipboard().setText(str(subject_id)))
+        menu.addAction(icons.icon("homework", ICON_COLOR, 16), "Переименовать…",
+                       lambda: self.rename_homework(subject_id))
+        return menu
+
     def add_link_dialog(self) -> None:
         """Accept any MaximumTest link: a course, a task, a subject."""
         text, ok = QInputDialog.getText(

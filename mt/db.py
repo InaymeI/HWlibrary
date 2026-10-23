@@ -24,12 +24,13 @@ from typing import Any
 from . import config
 from .models import find_course_title, looks_like_id, subject_title
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS subjects (
     id           INTEGER PRIMARY KEY,
     title        TEXT    NOT NULL DEFAULT '',
+    manual_title INTEGER NOT NULL DEFAULT 0,
     payload_json TEXT    NOT NULL DEFAULT '{}',
     fetched_at   INTEGER NOT NULL
 );
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS tests (
 CREATE TABLE IF NOT EXISTS courses (
     id           INTEGER PRIMARY KEY,
     title        TEXT    NOT NULL DEFAULT '',
+    manual_title INTEGER NOT NULL DEFAULT 0,
     payload_json TEXT    NOT NULL DEFAULT '{}',
     fetched_at   INTEGER NOT NULL
 );
@@ -169,6 +171,9 @@ def init() -> None:
         _migrate_v1(conn)
     if version < 2:
         _migrate_v2(conn)
+    # the title columns must exist before any repair query touches them
+    if version < 5:
+        _migrate_v5(conn)
     if version < 4:
         _migrate_v4()
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -228,6 +233,17 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         conn.executemany("UPDATE subjects SET title = ? WHERE id = ?", subject_updates)
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """Remember which names were typed by hand, so sync never overwrites them."""
+    if conn.in_transaction:
+        conn.execute("COMMIT")
+    for table in ("courses", "subjects"):
+        if "manual_title" not in _columns(conn, table):
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN manual_title INTEGER NOT NULL DEFAULT 0"
+            )
+
+
 def _migrate_v4() -> None:
     """Replace cached id-like предмет names with the real ones (one-off).
 
@@ -247,11 +263,12 @@ def upsert_subject(sid: int, title: str, payload: dict[str, Any]) -> None:
             """
             INSERT INTO subjects(id, title, payload_json, fetched_at) VALUES(?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
-                title        = excluded.title,
+                title = CASE WHEN subjects.manual_title = 1
+                             THEN subjects.title ELSE excluded.title END,
                 payload_json = excluded.payload_json,
                 fetched_at   = excluded.fetched_at
             """,
-            (sid, title or f"Предмет #{sid}", json.dumps(payload, ensure_ascii=False), now()),
+            (sid, title or f"Домашка #{sid}", json.dumps(payload, ensure_ascii=False), now()),
         )
 
 
@@ -267,7 +284,7 @@ def get_subject(sid: int) -> dict[str, Any] | None:
     if not row:
         return None
     subject = dict(row)
-    if title_is_generic(subject.get("title")):
+    if not subject.get("manual_title") and title_is_generic(subject.get("title")):
         real = subject_title_from_cache(int(sid))
         if real:
             subject["title"] = real
@@ -275,9 +292,24 @@ def get_subject(sid: int) -> dict[str, Any] | None:
 
 
 def rename_subject(sid: int, title: str) -> None:
-    """Store a name the user typed by hand (overrides the automatic one)."""
+    """Store a name the user typed by hand; sync will never overwrite it."""
     with transaction() as conn:
-        conn.execute("UPDATE subjects SET title = ? WHERE id = ?", (title, sid))
+        conn.execute(
+            "UPDATE subjects SET title = ?, manual_title = 1 WHERE id = ?", (title, sid)
+        )
+
+
+def set_subject_title(sid: int, title: str) -> None:
+    """Automatic name from the API: only fills in a placeholder."""
+    row = get_connection().execute(
+        "SELECT title, manual_title FROM subjects WHERE id = ?", (sid,)
+    ).fetchone()
+    if row is None or row["manual_title"] or not title_is_generic(row["title"]):
+        return
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE subjects SET title = ? WHERE id = ? AND manual_title = 0", (title, sid)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -347,7 +379,8 @@ def upsert_course(cid: int, title: str, payload: dict[str, Any]) -> None:
             """
             INSERT INTO courses(id, title, payload_json, fetched_at) VALUES(?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
-                title        = excluded.title,
+                title = CASE WHEN courses.manual_title = 1
+                             THEN courses.title ELSE excluded.title END,
                 payload_json = excluded.payload_json,
                 fetched_at   = excluded.fetched_at
             """,
@@ -360,7 +393,7 @@ def get_course(cid: int) -> dict[str, Any] | None:
     if not row:
         return None
     course = dict(row)
-    if title_is_generic(course.get("title")):
+    if not course.get("manual_title") and title_is_generic(course.get("title")):
         real = course_title_from_cache(int(cid))
         if real:
             course["title"] = real
@@ -403,7 +436,7 @@ def _course_stat_rows() -> list[dict[str, Any]]:
     result = []
     for row in rows:
         item = dict(row)
-        if title_is_generic(item.get("title")):
+        if not item.get("manual_title") and title_is_generic(item.get("title")):
             # Old caches may still hold «Предмет #111137»: read the name from
             # the payloads that are already on disk.
             real = course_title_from_cache(int(item["id"]))
@@ -419,8 +452,24 @@ def _course_stat_rows() -> list[dict[str, Any]]:
 
 
 def rename_course(cid: int, title: str) -> None:
+    """Store a name the user typed by hand; sync will never overwrite it."""
     with transaction() as conn:
-        conn.execute("UPDATE courses SET title = ? WHERE id = ?", (title, cid))
+        conn.execute(
+            "UPDATE courses SET title = ?, manual_title = 1 WHERE id = ?", (title, cid)
+        )
+
+
+def set_course_title(cid: int, title: str) -> None:
+    """Automatic name from the API: only fills in a placeholder."""
+    row = get_connection().execute(
+        "SELECT title, manual_title FROM courses WHERE id = ?", (cid,)
+    ).fetchone()
+    if row is None or row["manual_title"] or not title_is_generic(row["title"]):
+        return
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE courses SET title = ? WHERE id = ? AND manual_title = 0", (title, cid)
+        )
 
 
 def title_is_generic(title: str | None) -> bool:
@@ -429,6 +478,22 @@ def title_is_generic(title: str | None) -> bool:
     «Домашка №1» is a real name from the site and is *not* generic.
     """
     return looks_like_id(str(title or ""))
+
+
+def course_label(course: dict[str, Any]) -> str:
+    """What to show for a предмет: its name, or a readable «Предмет #id»."""
+    title = str(course.get("title") or "")
+    if title_is_generic(title):
+        return f"Предмет #{course.get('id')}"
+    return title
+
+
+def subject_label(subject: dict[str, Any]) -> str:
+    """What to show for a домашка: its name, or a readable «Домашка #id»."""
+    title = str(subject.get("title") or "")
+    if title_is_generic(title):
+        return f"Домашка #{subject.get('id')}"
+    return title
 
 
 def _load_json(raw: Any) -> Any:
@@ -492,7 +557,9 @@ def repair_course_titles() -> int:
     """Rename every предмет/домашка with an id-like name; returns the count."""
     conn = get_connection()
     updates = []
-    for row in conn.execute("SELECT id, title FROM courses").fetchall():
+    for row in conn.execute(
+        "SELECT id, title FROM courses WHERE manual_title = 0"
+    ).fetchall():
         if not title_is_generic(row["title"]):
             continue
         title = course_title_from_cache(int(row["id"]))
@@ -501,7 +568,9 @@ def repair_course_titles() -> int:
     if updates:
         conn.executemany("UPDATE courses SET title = ? WHERE id = ?", updates)
     subject_updates = []
-    for row in conn.execute("SELECT id, title FROM subjects").fetchall():
+    for row in conn.execute(
+        "SELECT id, title FROM subjects WHERE manual_title = 0"
+    ).fetchall():
         if not title_is_generic(row["title"]):
             continue
         title = subject_title_from_cache(int(row["id"]))
@@ -643,7 +712,14 @@ def lesson_subjects(lesson_id: int) -> list[dict[str, Any]]:
         item = dict(row)
         subject_title = item.pop("subject_title")
         lesson_title = item.pop("lesson_title")
-        item["title"] = subject_title or lesson_title or f"Домашка #{item['id']}"
+        # a placeholder («Домашка #777», «Предмет #777») is not a name; the
+        # lesson title is a better guess, the id is the last resort
+        title = next(
+            (text for text in (subject_title, lesson_title)
+             if text and not title_is_generic(text)),
+            "",
+        )
+        item["title"] = title or f"Домашка #{item['id']}"
         item["total"] = item.get("total") or 0
         item["supported"] = item.get("supported") or 0
         rows.append(item)
@@ -1079,16 +1155,34 @@ def _filter_clause(
         args.append(type_filter)
     for token in search.lower().split():
         pattern = _like_pattern(token)
-        where.append(
-            "(ulower(t.title) LIKE ? ESCAPE '\\' OR CAST(t.id AS TEXT) LIKE ? ESCAPE '\\'"
-            " OR ulower(t.type) LIKE ? ESCAPE '\\' OR ulower(k.title) LIKE ? ESCAPE '\\'"
-            " OR ulower(s.title) LIKE ? ESCAPE '\\'"
-            " OR t.subject_id IN (SELECT ls.subject_id FROM lessons l"
+        # тексты: название задания, тип, раздел, домашка, предмет, урок
+        alternatives = [
+            "ulower(t.title) LIKE ? ESCAPE '\\'",
+            "CAST(t.id AS TEXT) LIKE ? ESCAPE '\\'",
+            "ulower(t.type) LIKE ? ESCAPE '\\'",
+            "ulower(k.title) LIKE ? ESCAPE '\\'",
+            "ulower(s.title) LIKE ? ESCAPE '\\'",
+            "t.subject_id IN (SELECT ls.subject_id FROM lessons l"
             " JOIN lesson_subjects ls ON ls.lesson_id = l.id"
             " JOIN courses c ON c.id = l.course_id"
-            " WHERE ulower(c.title) LIKE ? ESCAPE '\\'))"
-        )
-        args.extend([pattern] * 6)
+            " WHERE ulower(c.title) LIKE ? ESCAPE '\\')",
+            "t.subject_id IN (SELECT ls.subject_id FROM lessons l"
+            " JOIN lesson_subjects ls ON ls.lesson_id = l.id"
+            " WHERE ulower(l.title) LIKE ? ESCAPE '\\')",
+        ]
+        args.extend([pattern] * len(alternatives))
+        # числа: точное совпадение с id задания, домашки, раздела, урока, предмета
+        if token.isdigit():
+            alternatives.extend((
+                "t.id = ?",
+                "t.subject_id = ?",
+                "t.kbs_id = ?",
+                "t.subject_id IN (SELECT ls.subject_id FROM lessons l"
+                " JOIN lesson_subjects ls ON ls.lesson_id = l.id"
+                " WHERE l.id = ? OR l.entity_lesson_id = ? OR l.course_id = ?)",
+            ))
+            args.extend([int(token)] * 6)
+        where.append("(" + " OR ".join(alternatives) + ")")
     return (" WHERE " + " AND ".join(where)) if where else "", args
 
 

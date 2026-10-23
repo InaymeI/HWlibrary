@@ -316,7 +316,7 @@ class ElidedLabel(QLabel):
 
 
 class ClickableFrame(QFrame):
-    """A card that behaves like a button (hover + click)."""
+    """A card that behaves like a button (hover, click and right click)."""
 
     clicked = pyqtSignal()
 
@@ -326,6 +326,19 @@ class ClickableFrame(QFrame):
         self.setProperty("clickable", True)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._menu_handler = None
+
+    def set_menu_handler(self, handler) -> None:
+        """``handler(global_pos)`` opens the context menu of this row."""
+        self._menu_handler = handler
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._menu_handler is not None:
+            self._menu_handler(event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):

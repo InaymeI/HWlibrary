@@ -190,6 +190,64 @@ def test_db_query_filters_and_search(temp_db):
     assert db.query_tests_count(search="математика сложное") == 1
 
 
+def test_search_finds_homework_section_course_and_lesson_ids(temp_db):
+    """A number typed into the search must find its homework, not nothing."""
+    db.upsert_course(111137, "История России", {})
+    db.replace_course_lessons(111137, [
+        {"id": 41907128, "entity_id": 4772366, "title": "Занятие 9", "position": 1},
+    ])
+    db.set_lesson_subjects(41907128, [
+        {"subject_id": 777, "title": "Домашка №1", "position": 1},
+    ])
+    db.upsert_subject(777, "Домашка №1", {})
+    db.upsert_kbs(501, 777, "online", "Раздел 1", 41907128)
+    db.upsert_tests([
+        (1001, 501, 777, "type1", "Одиночный выбор", {}),
+        (1002, 501, 777, "type2", "Множественный выбор", {}),
+    ])
+
+    # homework id, section id, course id, entity lesson id, lesson title
+    assert db.query_tests_count(search="777") == 2
+    assert db.query_tests_count(search="501") == 2
+    assert db.query_tests_count(search="111137") == 2
+    assert db.query_tests_count(search="4772366") == 2
+    assert db.query_tests_count(search="занятие 9") == 2
+    # test id and homework name keep working
+    assert db.query_tests_count(search="1002") == 1
+    assert db.query_tests_count(search="домашка №1") == 2
+    # a number that matches nothing stays empty
+    assert db.query_tests_count(search="999999") == 0
+
+
+def test_manual_titles_survive_sync_and_repair(temp_db):
+    """A name typed by hand must not be replaced by the automatic one."""
+    db.upsert_course(111102, "Предмет #111102", {})
+    db.upsert_subject(51610, "Домашка #51610", {})
+    db.rename_course(111102, "Мой предмет")
+    db.rename_subject(51610, "Моя домашка")
+
+    # a sync arrives with the server's own names
+    db.upsert_course(111102, "История России", {"courseTitleForModule": "История России"})
+    db.upsert_subject(51610, "Домашняя работа", {"title": "Домашняя работа"})
+    assert db.get_course(111102)["title"] == "Мой предмет"
+    assert db.get_subject(51610)["title"] == "Моя домашка"
+
+    # and the one-off repair of id-like names leaves manual rows alone
+    db.rename_course(111102, "111102")
+    db.rename_subject(51610, "51610")
+    db.repair_course_titles()
+    assert db.get_course(111102)["title"] == "111102"
+    assert db.get_subject(51610)["title"] == "51610"
+
+
+def test_set_course_title_only_fills_a_placeholder(temp_db):
+    db.upsert_course(1, "Предмет #1", {})
+    db.set_course_title(1, "История России")
+    assert db.get_course(1)["title"] == "История России"
+    db.set_course_title(1, "Другое имя")
+    assert db.get_course(1)["title"] == "История России"
+
+
 def test_db_migration_from_v1_schema(tmp_path):
     """An old database without the title/lesson columns must keep working."""
     import sqlite3
@@ -217,6 +275,18 @@ def test_db_migration_from_v1_schema(tmp_path):
         db.init()
         assert db.list_subjects()[0]["title"] == "Старый"
         assert db.list_tests(1)[0]["title"] == "Восстановленный заголовок"
+        # v5: the manual-title flag is added and defaults to «auto»
+        columns = {
+            row["name"]: row
+            for row in db.get_connection().execute("PRAGMA table_info(subjects)")
+        }
+        assert "manual_title" in columns
+        assert db.get_subject(1)["manual_title"] == 0
+        course_columns = {
+            row["name"]: row
+            for row in db.get_connection().execute("PRAGMA table_info(courses)")
+        }
+        assert "manual_title" in course_columns
     finally:
         db.close()
         db.set_database_path(None)
