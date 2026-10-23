@@ -641,12 +641,38 @@ QFrame#cardFlat {
 }
 QFrame#card[clickable="true"]:hover { background: rgba(255, 255, 255, 0.90); }
 
+/* Explorer-era proportions: glass frame, white working area, blue command band. */
+QLabel#aeroCaption {
+    color: #ffffff; font-family: "Segoe UI", "DejaVu Sans";
+    font-size: 14px; font-weight: 600; background: transparent;
+}
+QFrame#sidePanel {
+    background: rgba(232, 246, 255, 0.88);
+    border: 1px solid #d6edff; border-radius: 5px;
+}
+QFrame#content {
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #e6f6ff; border-radius: 5px;
+}
+QFrame#pageHeader {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #f5fbff,stop:0.55 #e6f2fc,stop:1 #c6def3);
+    border-bottom: 1px solid #94b8d4;
+}
+QLabel[role="h1"] { font-size: 25px; font-weight: 400; color: #173c65; }
+QFrame#card {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff,stop:1 #edf6fc);
+    border: 1px solid #c0d8e9; border-radius: 5px;
+}
+QFrame#cardFlat { border: 1px solid #c0d8e9; border-radius: 4px; }
+QTreeWidget#sidebar { border-radius: 3px; }
+
 /* --- taskbar: the rail becomes a Windows 7 glass bar --- */
 QFrame#rail[chrome="taskbar"] {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 $taskbar_top, stop:0.5 $taskbar_top, stop:1 $taskbar_bottom);
     border: 1px solid $taskbar_border;
-    border-radius: 14px;
+    border-radius: 3px;
 }
 QToolButton#railButton[chrome="taskbar"] {
     border-radius: 8px;

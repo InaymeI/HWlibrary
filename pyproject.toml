@@ -29,6 +29,9 @@ maximumtest-gui = "mt.__main__:main"
 [tool.setuptools]
 packages = ["mt", "mt.ui"]
 
+[tool.setuptools.package-data]
+mt = ["assets/aero/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning:mt.*"]

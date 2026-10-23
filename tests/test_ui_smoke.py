@@ -681,3 +681,29 @@ def test_aero_all_pages_render(app, window):
         app.processEvents()
         assert not window.grab().isNull()
     assert window.theme_actions["aero"].isChecked()
+
+
+def test_aero_assets_and_icon_cache_roundtrip(app, window):
+    """Packaged assets load offline; switching clears both icon caches."""
+    import json
+
+    from PyQt6.QtGui import QIcon, QPixmap
+
+    from mt import icons
+
+    sources = json.loads((icons.ASSET_DIR / "sources.json").read_text())
+    for filename in sources["files"]:
+        path = icons.ASSET_DIR / filename
+        assert path.is_file()
+        if filename.endswith(".ico"):
+            assert not QIcon(str(path)).isNull()
+    assert not QPixmap(str(icons.ASSET_DIR / "wallpaper.jpg")).isNull()
+    window.apply_theme("light", persist=False)
+    flat = icons.pixmap("book", "#ffffff", 32).toImage()
+    window.apply_theme("aero", persist=False)
+    aero = icons.pixmap("book", "#ffffff", 32).toImage()
+    assert aero != flat
+    assert window.aero_caption.isVisible()
+    window.apply_theme("light", persist=False)
+    assert not window.aero_caption.isVisible()
+    assert icons.pixmap("book", "#ffffff", 32).toImage() == flat

@@ -781,6 +781,7 @@ class Shell(QWidget):
         super().__init__(parent)
         self._palette: Palette = PALETTES["light"]
         self._panels: list[tuple[QRectF, float]] = []
+        self._wallpaper = QPixmap(str(icons.ASSET_DIR / "wallpaper.jpg"))
 
     def set_palette(self, palette: Palette) -> None:
         self._palette = palette
@@ -803,7 +804,15 @@ class Shell(QWidget):
 
     # ------------------------------------------------------------------ #
     def _paint_sky(self, painter: QPainter, rect: QRectF) -> None:
-        """Bright Aero sky: gradient, sun haze, bubbles and a green horizon."""
+        """Original Windows 7 wallpaper, cropped to fill without distortion."""
+        if not self._wallpaper.isNull():
+            image = self._wallpaper
+            scale = max(rect.width() / image.width(), rect.height() / image.height())
+            width, height = rect.width() / scale, rect.height() / scale
+            source = QRectF((image.width() - width) / 2, (image.height() - height) / 2,
+                            width, height)
+            painter.drawPixmap(rect, image, source)
+            return
         pal = self._palette
         sky = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         sky.setColorAt(0.0, paint_color(pal.sky_top))
@@ -1134,7 +1143,7 @@ class StartOrb(QToolButton):
         painter.setPen(QPen(QColor(255, 255, 255, 200), 1.2))
         painter.drawEllipse(box)
 
-        icon = icons.icon("book", "#ffffff", 22)
+        icon = icons.icon("grid", "#ffffff", 26)
         icon.paint(
             painter,
             QRect(
@@ -1282,7 +1291,7 @@ class Rail(QFrame):
         repolish(self)
 
         if horizontal:
-            self.setFixedHeight(60)
+            self.setFixedHeight(54)
             self.setMinimumWidth(0)
             self.setMaximumWidth(16777215)
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1378,17 +1387,19 @@ class Rail(QFrame):
         for key, button in self._nav.items():
             button.setChecked(key == active)
             color = RAIL_ICON_ACTIVE if key == active else RAIL_ICON_IDLE
-            button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
+            button.setIcon(icons.icon(_NAV_ICONS[key], color, 30 if self._horizontal else 20))
 
     def restyle(self, theme: str) -> None:
         """Keep the rail legible: it stays dark in every theme."""
         self.update_clock()
+        for button in self._all_buttons:
+            button.setIconSize(QSize(30, 30) if theme == "aero" else QSize(21, 21))
         for button, _action, icon_name in self._bound:
-            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 21))
+            button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 30 if theme == "aero" else 21))
         for key, button in self._nav.items():
             active = button.isChecked()
             color = RAIL_ICON_ACTIVE if active else RAIL_ICON_IDLE
-            button.setIcon(icons.icon(_NAV_ICONS[key], color, 20))
+            button.setIcon(icons.icon(_NAV_ICONS[key], color, 30 if self._horizontal else 20))
         self.theme_button.setIcon(
             icons.icon("sun" if theme in ("dark", "aero") else "moon", RAIL_ICON_IDLE, 21)
         )
@@ -1398,7 +1409,7 @@ class Rail(QFrame):
                 "dark": "Frutiger Aero",
             }.get(theme, "Тёмная тема")
         )
-        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 21))
+        self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 30 if theme == "aero" else 21))
 
 
 _NAV_ICONS = {"dash": "grid", "courses": "book", "all": "layers"}
@@ -1565,6 +1576,12 @@ class MainWindow(QMainWindow):
         self.root_layout = QVBoxLayout(shell)
         self.root_layout.setContentsMargins(18, 18, 18, 4)
         self.root_layout.setSpacing(10)
+        self.aero_caption = QLabel("MaximumTest Library — Библиотека заданий")
+        self.aero_caption.setObjectName("aeroCaption")
+        self.aero_caption.setContentsMargins(12, 5, 12, 5)
+        self.aero_caption.setFixedHeight(34)
+        self.aero_caption.hide()
+        self.root_layout.addWidget(self.aero_caption)
 
         #: The body holds the rail and the two glass panels side by side.
         self.body = QWidget()
@@ -1726,6 +1743,7 @@ class MainWindow(QMainWindow):
         if aero == self._chrome_aero:
             return
         self._chrome_aero = aero
+        self.aero_caption.setVisible(aero)
         self.rail.set_horizontal(aero)
         self.rail_shadow.set_horizontal(aero)
 
@@ -1742,8 +1760,8 @@ class MainWindow(QMainWindow):
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
             )
             self.root_layout.addWidget(self.rail_holder, 0)
-            self.root_layout.setContentsMargins(18, 18, 18, 12)
-            self.root_layout.setSpacing(8)
+            self.root_layout.setContentsMargins(10, 0, 10, 0)
+            self.root_layout.setSpacing(3)
         else:
             holder.setDirection(QBoxLayout.Direction.LeftToRight)
             holder.addWidget(self.rail, 0)
@@ -1782,6 +1800,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(stylesheet(resolved))
+        icons.set_theme(resolved)
         ICONS.recolor(self._pal)
         self.rail.restyle(self._pal.name)
         self.rail_shadow.set_theme(self._pal)
