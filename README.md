@@ -261,7 +261,7 @@ MIT
 
 ### Экспериментальная тема Frutiger Aero
 
-Включение: **Пуск / Настройки → Вид → Тема → Frutiger Aero (Windows 7)**.
+Включение: **Пуск / Настройки → Вид → Тема → Windows Vista Aero**.
 [Описание и скриншоты](docs/aero/README.md). Ассеты Windows из
 [bartekl1/windows-ui-assets](https://github.com/bartekl1/windows-ui-assets)
 принадлежат Microsoft и **не входят в MIT-лицензию приложения**;

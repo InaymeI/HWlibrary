@@ -1,9 +1,9 @@
-# Windows 7 assets — third-party notice
+# Windows Vista assets — third-party notice
 
 Source: https://github.com/bartekl1/windows-ui-assets
 Exact upstream revision and original paths: `sources.json`.
 
-The wallpaper and ICO files are original Microsoft Windows 7 resources,
+The wallpaper and ICO files are original Microsoft Windows Vista resources,
 archived by bartekl1. Copyright and trademarks belong to Microsoft Corporation.
 They are **not covered by this application's MIT license**.
 

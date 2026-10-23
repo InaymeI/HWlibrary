@@ -2,13 +2,13 @@
   "repository": "https://github.com/bartekl1/windows-ui-assets",
   "revision": "21970f48b8f66b4d44742cb30388c1454512d681",
   "files": {
-    "wallpaper.jpg": "Wallpapers/Windows 7/Desktop/Windows/img0.jpg",
-    "shell-4.ico": "Icons/Windows 7/ico/shell32.dll/ICON4_1.ico",
-    "shell-15.ico": "Icons/Windows 7/ico/shell32.dll/ICON15_1.ico",
-    "shell-16.ico": "Icons/Windows 7/ico/shell32.dll/ICON16_1.ico",
-    "shell-22.ico": "Icons/Windows 7/ico/shell32.dll/ICON22_1.ico",
-    "shell-23.ico": "Icons/Windows 7/ico/shell32.dll/ICON23_1.ico",
-    "shell-24.ico": "Icons/Windows 7/ico/shell32.dll/ICON24_1.ico",
-    "shell-25.ico": "Icons/Windows 7/ico/shell32.dll/ICON25_1.ico"
+    "wallpaper.jpg": "Wallpapers/Windows Vista/Desktop/img24.jpg",
+    "shell-4.ico": "Icons/Windows Vista/ico/shell32.dll/ICON4_1.ico",
+    "shell-15.ico": "Icons/Windows Vista/ico/shell32.dll/ICON15_1.ico",
+    "shell-16.ico": "Icons/Windows Vista/ico/shell32.dll/ICON16_1.ico",
+    "shell-22.ico": "Icons/Windows Vista/ico/shell32.dll/ICON22_1.ico",
+    "shell-23.ico": "Icons/Windows Vista/ico/shell32.dll/ICON23_1.ico",
+    "shell-24.ico": "Icons/Windows Vista/ico/shell32.dll/ICON24_1.ico",
+    "shell-25.ico": "Icons/Windows Vista/ico/shell32.dll/ICON25_1.ico"
   }
 }

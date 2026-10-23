@@ -165,7 +165,7 @@ def paint_aero_pill(
     radius: int = 12,
     strength: float = 1.0,
 ) -> None:
-    """Windows 7 style selection: a glossy aqua pill with a white rim.
+    """Windows Vista style selection: a glossy aqua pill with a white rim.
 
     The 2009 look is a *vertical* gradient — almost white at the top, deeper
     aqua at the bottom — plus a bright specular band across the upper half.

@@ -732,3 +732,26 @@ def test_aero_typography_and_density_restore(app, window):
     assert header.layout().contentsMargins() == original
     assert window.sidebar._nav_rows["dash"].height() == 44
     assert delegate._row_height == 40
+
+
+def test_vista_assets_and_labeled_taskbar(app, window):
+    import json
+
+    from mt import icons
+
+    manifest = json.loads((icons.ASSET_DIR / "sources.json").read_text())
+    assert all("Windows Vista/" in path for path in manifest["files"].values())
+    window.apply_theme("aero", persist=False)
+    app.processEvents()
+    for button in window.rail._nav.values():
+        assert button.text()
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+    assert window.theme_actions["aero"].text() == "Windows Vista Aero"
+    window.resize(1024, 640)
+    app.processEvents()
+    assert window.rail.settings_button.geometry().right() <= window.rail.width()
+    window.apply_theme("light", persist=False)
+    app.processEvents()
+    for button in window.rail._nav.values():
+        assert button.width() == 46
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly

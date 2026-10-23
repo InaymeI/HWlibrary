@@ -807,7 +807,7 @@ class Shell(QWidget):
 
     # ------------------------------------------------------------------ #
     def _paint_sky(self, painter: QPainter, rect: QRectF) -> None:
-        """Original Windows 7 wallpaper, cropped to fill without distortion."""
+        """Original Windows Vista wallpaper, cropped to fill without distortion."""
         if not self._wallpaper.isNull():
             image = self._wallpaper
             scale = max(rect.width() / image.width(), rect.height() / image.height())
@@ -1085,7 +1085,7 @@ class RailShadow(QWidget):
 class StartOrb(QToolButton):
     """The round, glossy «Пуск» orb of the Aero taskbar.
 
-    Windows 7 put a bright sphere in the corner instead of a word; this is the
+    Windows Vista put a bright sphere in the corner instead of a word; this is the
     same idea painted by hand: a radial blue body, a white specular cap, a
     hairline rim and the app glyph in the middle.
     """
@@ -1159,7 +1159,7 @@ class StartOrb(QToolButton):
 
 
 class Rail(QFrame):
-    """Navigation chrome: a tall dark rail, or a Windows 7 taskbar.
+    """Navigation chrome: a tall dark rail, or a Windows Vista taskbar.
 
     The same buttons live in one widget and only their arrangement changes:
     ``set_horizontal(True)`` turns the rail into the bottom glass taskbar of
@@ -1347,6 +1347,13 @@ class Rail(QFrame):
             self.orb.hide()
             self.logo.show()
 
+        for key, button in self._nav.items():
+            button.setText({"dash": "Обзор", "courses": "Предметы", "all": "Задания"}[key])
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextBesideIcon if horizontal
+                else Qt.ToolButtonStyle.ToolButtonIconOnly
+            )
+            button.setFixedSize(108 if horizontal else 46, 38 if horizontal else 46)
         for button in self._all_buttons:
             button.setProperty("chrome", "taskbar" if horizontal else "rail")
             repolish(button)
@@ -1396,7 +1403,7 @@ class Rail(QFrame):
         """Keep the rail legible: it stays dark in every theme."""
         self.update_clock()
         for button in self._all_buttons:
-            button.setIconSize(QSize(30, 30) if theme == "aero" else QSize(21, 21))
+            button.setIconSize(QSize(22, 22) if theme == "aero" else QSize(21, 21))
         for button, _action, icon_name in self._bound:
             button.setIcon(icons.icon(icon_name, RAIL_ICON_IDLE, 30 if theme == "aero" else 21))
         for key, button in self._nav.items():
@@ -1409,7 +1416,7 @@ class Rail(QFrame):
         self.theme_button.setToolTip(
             {
                 "aero": "Вернуть светлую тему",
-                "dark": "Frutiger Aero",
+                "dark": "Windows Vista Aero",
             }.get(theme, "Тёмная тема")
         )
         self.settings_button.setIcon(icons.icon("settings", RAIL_ICON_IDLE, 30 if theme == "aero" else 21))
@@ -1513,7 +1520,7 @@ class MainWindow(QMainWindow):
         for name, title in (
             ("light", "Светлая"),
             ("dark", "Тёмная"),
-            ("aero", "Frutiger Aero (Windows 7)"),
+            ("aero", "Windows Vista Aero"),
             ("system", "Как в системе"),
         ):
             act = QAction(title, self, checkable=True)
@@ -1579,7 +1586,7 @@ class MainWindow(QMainWindow):
         self.root_layout = QVBoxLayout(shell)
         self.root_layout.setContentsMargins(18, 18, 18, 4)
         self.root_layout.setSpacing(10)
-        self.aero_caption = QLabel("MaximumTest Library — Библиотека заданий")
+        self.aero_caption = QLabel("MaximumTest Library — Windows Vista Aero")
         self.aero_caption.setObjectName("aeroCaption")
         self.aero_caption.setContentsMargins(12, 5, 12, 5)
         self.aero_caption.setFixedHeight(34)
@@ -1738,7 +1745,7 @@ class MainWindow(QMainWindow):
         """Lay the window out for the current theme.
 
         Flat themes get the tall rail on the left and a status bar; Frutiger
-        Aero moves the same buttons into a Windows 7 taskbar at the bottom of
+        Aero moves the same buttons into a Windows Vista taskbar at the bottom of
         the window, hides the status bar and shows the tray (status, clock,
         progress) instead.
         """

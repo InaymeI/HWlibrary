@@ -54,7 +54,7 @@ class Palette:
     #: Glossy bubbles floating on the canvas.
     bubble: str = ""
     bubble_rim: str = ""
-    #: Bottom taskbar (Windows 7 style) and the glass panels.
+    #: Bottom taskbar (Windows Vista style) and the glass panels.
     taskbar_top: str = ""
     taskbar_bottom: str = ""
     taskbar_border: str = ""
@@ -134,7 +134,7 @@ DARK = Palette(
     rail_shadow="rgba(0, 0, 0, 0.70)",
 )
 
-#: Frutiger Aero / Windows 7: a bright sky, white glass panels, an aqua-blue
+#: Windows Vista Aero: a bright sky, white glass panels, an aqua-blue
 #: taskbar and glossy pills.  Every extra field above is used only here.
 AERO = Palette(
     name="aero",
@@ -174,8 +174,8 @@ AERO = Palette(
     sky_glow="rgba(255, 255, 255, 0.55)",
     bubble="rgba(255, 255, 255, 0.16)",
     bubble_rim="rgba(255, 255, 255, 0.55)",
-    taskbar_top="rgba(46, 108, 158, 0.94)",
-    taskbar_bottom="rgba(9, 40, 70, 0.94)",
+    taskbar_top="rgba(73, 86, 86, 0.96)",
+    taskbar_bottom="rgba(8, 15, 16, 0.98)",
     taskbar_border="rgba(255, 255, 255, 0.55)",
     panel_top="rgba(255, 255, 255, 0.92)",
     panel_bottom="rgba(214, 240, 254, 0.86)",
@@ -611,7 +611,7 @@ QCheckBox::indicator {
 }
 QCheckBox::indicator:checked { background: $accent; border-color: $accent; }
 
-/* ======================= Frutiger Aero (Windows 7) ======================= */
+/* ======================= Windows Vista Aero ======================= */
 $aero
 """)
 
@@ -635,11 +635,13 @@ QFrame#card[clickable="true"]:hover { background: #e8f4ff; border-color: #7da2ce
 
 /* Explorer-era proportions: glass frame, white working area, blue command band. */
 QLabel#aeroCaption {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(82,110,104,0.78),stop:0.5 rgba(22,47,43,0.82),stop:1 rgba(8,24,21,0.88));
+    border: 1px solid rgba(210,235,225,0.6);
     color: #ffffff; font-family: "Segoe UI", "DejaVu Sans";
-    font-size: 14px; font-weight: 600; background: transparent;
+    font-size: 12px; font-weight: 400;
 }
 QFrame#sidePanel {
-    background: rgba(232, 246, 255, 0.88);
+    background: #f1f5f1;
     border: 1px solid #d6edff; border-radius: 5px;
 }
 QFrame#content {
@@ -648,10 +650,10 @@ QFrame#content {
 }
 QFrame#pageHeader {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #f5fbff,stop:0.55 #e6f2fc,stop:1 #c6def3);
-    border-bottom: 1px solid #94b8d4;
+        stop:0 #f5faf2,stop:0.5 #e6efdf,stop:1 #d4e2c9);
+    border-bottom: 1px solid #a3b69b;
 }
-QLabel[role="h1"] { font-size: 22px; font-weight: 400; color: #173c65; }
+QLabel[role="h1"] { font-size: 20px; font-weight: 400; color: #294625; }
 QFrame#card {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff,stop:1 #edf6fc);
     border: 1px solid #d3dfea; border-radius: 3px;
@@ -659,15 +661,16 @@ QFrame#card {
 QFrame#cardFlat { border: 1px solid #c0d8e9; border-radius: 4px; }
 QTreeWidget#sidebar { border-radius: 3px; }
 
-/* --- taskbar: the rail becomes a Windows 7 glass bar --- */
+/* --- taskbar: the rail becomes a Windows Vista glass bar --- */
 QFrame#rail[chrome="taskbar"] {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 $taskbar_top, stop:0.5 $taskbar_top, stop:1 $taskbar_bottom);
+        stop:0 #637575, stop:0.46 #334141, stop:0.50 #111b1b, stop:1 #1d2929);
     border: 1px solid $taskbar_border;
     border-radius: 3px;
 }
 QToolButton#railButton[chrome="taskbar"] {
-    border-radius: 8px;
+    color: #ffffff;
+    border-radius: 3px;
     border: 1px solid transparent;
 }
 QToolButton#railButton[chrome="taskbar"]:hover {
@@ -710,14 +713,14 @@ QPushButton:disabled {
 }
 QPushButton[variant="primary"] {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #8fd8ff, stop:0.45 #3a9ede, stop:0.55 #1f7dc4, stop:1 #0f5f9f);
-    border: 1px solid #0a4a7d;
+        stop:0 #d8efc6, stop:0.45 #83b655, stop:0.55 #548c2e, stop:1 #33631b);
+    border: 1px solid #42682c;
     color: #ffffff;
     font-weight: 600;
 }
 QPushButton[variant="primary"]:hover {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 #b3e6ff, stop:0.45 #57b4ee, stop:0.55 #2a8ed4, stop:1 #1470b3);
+        stop:0 #eff9e3, stop:0.45 #a8d97c, stop:0.55 #699e42, stop:1 #467a27);
 }
 QPushButton[variant="primary"]:pressed {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
