@@ -7,9 +7,29 @@ themes) and lets every icon follow the active colour palette.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+
+ASSET_DIR = Path(__file__).resolve().parent / "assets" / "aero"
+_AERO_ICONS = {
+    "book": "shell-4.ico", "homework": "shell-4.ico",
+    "grid": "shell-16.ico", "layers": "shell-25.ico",
+    "refresh": "shell-15.ico", "settings": "shell-22.ico",
+    "search": "shell-23.ico", "info": "shell-24.ico",
+}
+_theme = "light"
+
+
+def set_theme(name: str) -> None:
+    """Switch the optional Windows icon set; flat themes keep vector icons."""
+    global _theme
+    if name != _theme:
+        _theme = name
+        icon.cache_clear()
+        pixmap.cache_clear()
+
 
 _VIEWBOX = 24.0
 
@@ -178,6 +198,12 @@ def _draw(name: str, painter: QPainter, color: str) -> None:
 
 @lru_cache(maxsize=512)
 def pixmap(name: str, color: str, size: int = 18, ratio: float = 2.0) -> QPixmap:
+    if _theme == "aero" and name in _AERO_ICONS:
+        asset = QIcon(str(ASSET_DIR / _AERO_ICONS[name]))
+        if not asset.isNull():
+            result = asset.pixmap(int(size * ratio), int(size * ratio))
+            result.setDevicePixelRatio(ratio)
+            return result
     px = int(size * ratio)
     canvas = QPixmap(px, px)
     canvas.fill(Qt.GlobalColor.transparent)

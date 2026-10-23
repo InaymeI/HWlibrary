@@ -45,6 +45,25 @@ class Palette:
     glass_highlight: str
     glass_shadow: str
     rail_shadow: str
+    # --- Frutiger Aero extras (empty in the flat themes) ------------------
+    #: Canvas: a bright sky behind the glass panels.
+    sky_top: str = ""
+    sky_mid: str = ""
+    sky_bottom: str = ""
+    sky_glow: str = ""
+    #: Glossy bubbles floating on the canvas.
+    bubble: str = ""
+    bubble_rim: str = ""
+    #: Bottom taskbar (Windows Vista style) and the glass panels.
+    taskbar_top: str = ""
+    taskbar_bottom: str = ""
+    taskbar_border: str = ""
+    panel_top: str = ""
+    panel_bottom: str = ""
+    panel_edge: str = ""
+    #: Fill of a glossy selection pill / button highlight.
+    gloss_top: str = ""
+    gloss_bottom: str = ""
 
 
 LIGHT = Palette(
@@ -115,11 +134,66 @@ DARK = Palette(
     rail_shadow="rgba(0, 0, 0, 0.70)",
 )
 
-PALETTES = {"light": LIGHT, "dark": DARK}
+#: Windows Vista Aero: a bright sky, white glass panels, an aqua-blue
+#: taskbar and glossy pills.  Every extra field above is used only here.
+AERO = Palette(
+    name="aero",
+    bg="#3f9ad6",
+    surface="rgba(247, 253, 255, 0.86)",
+    surface_alt="rgba(228, 246, 255, 0.80)",
+    sidebar="rgba(242, 251, 255, 0.82)",
+    border="rgba(255, 255, 255, 0.95)",
+    border_strong="rgba(255, 255, 255, 1.0)",
+    text="#0a2742",
+    text_secondary="#26557c",
+    muted="#5a7f9e",
+    accent="#0f6cb4",
+    accent_hover="#1a86d6",
+    accent_pressed="#0a5088",
+    accent_soft="rgba(255, 255, 255, 0.55)",
+    success="#1a7f45",
+    success_soft="rgba(163, 255, 205, 0.45)",
+    warning="#8a5c00",
+    warning_soft="rgba(255, 226, 150, 0.50)",
+    danger="#b03028",
+    danger_soft="rgba(255, 178, 170, 0.45)",
+    selection="rgba(255, 255, 255, 0.62)",
+    rail="rgba(9, 45, 78, 0.90)",
+    rail_hover="rgba(255, 255, 255, 0.22)",
+    rail_active="rgba(255, 255, 255, 0.34)",
+    on_accent="#ffffff",
+    glass_start="rgba(255, 255, 255, 0.62)",
+    glass_end="rgba(255, 255, 255, 0.86)",
+    glass_border="rgba(255, 255, 255, 0.95)",
+    glass_highlight="rgba(255, 255, 255, 0.55)",
+    glass_shadow="rgba(8, 42, 72, 0.40)",
+    rail_shadow="rgba(8, 42, 72, 0.42)",
+    sky_top="#11558f",
+    sky_mid="#3f9ad6",
+    sky_bottom="#a6e5f2",
+    sky_glow="rgba(255, 255, 255, 0.55)",
+    bubble="rgba(255, 255, 255, 0.16)",
+    bubble_rim="rgba(255, 255, 255, 0.55)",
+    taskbar_top="rgba(73, 86, 86, 0.96)",
+    taskbar_bottom="rgba(8, 15, 16, 0.98)",
+    taskbar_border="rgba(255, 255, 255, 0.55)",
+    panel_top="rgba(255, 255, 255, 0.92)",
+    panel_bottom="rgba(214, 240, 254, 0.86)",
+    panel_edge="rgba(255, 255, 255, 0.98)",
+    gloss_top="rgba(255, 255, 255, 0.96)",
+    gloss_bottom="rgba(150, 212, 246, 0.92)",
+)
+
+PALETTES = {"light": LIGHT, "dark": DARK, "aero": AERO}
 
 
 def palette(name: str) -> Palette:
     return PALETTES.get(name, LIGHT)
+
+
+def is_aero(palette: Palette) -> bool:
+    """True for the Frutiger Aero theme (sky canvas + taskbar chrome)."""
+    return palette.name == "aero"
 
 
 STYLESHEET = Template("""
@@ -536,9 +610,263 @@ QCheckBox::indicator {
     background: $surface;
 }
 QCheckBox::indicator:checked { background: $accent; border-color: $accent; }
+
+/* ======================= Windows Vista Aero ======================= */
+$aero
 """)
+
+
+#: Extra rules appended for the Aero theme only.  Later rules win, so this
+#: block repaints the flat grey chrome as glossy sky-blue glass.
+AERO_QSS = """
+QMainWindow, QDialog, QWizard, QWidget#shell { background: $bg; }
+
+/* Vista / Windows 7 used Segoe UI, not the modern Inter display face.
+   Tahoma is an installed Windows-era fallback; no proprietary font is bundled. */
+QWidget { font-family: "Segoe UI", "Tahoma", "Noto Sans", "DejaVu Sans"; font-size: 12px; }
+QLabel[role="mono"], QPlainTextEdit#log { font-family: "Consolas", "DejaVu Sans Mono"; }
+QLabel[role="h2"] { font-size: 15px; font-weight: 400; color: #003c74; }
+QLabel[role="h3"] { font-size: 13px; font-weight: 600; }
+QLabel[role="stat"] { font-size: 28px; font-weight: 400; }
+QLabel[role="statSmall"] { font-size: 20px; font-weight: 400; }
+QLabel[role="badge"] { border-radius: 3px; padding: 1px 5px; font-weight: 400; }
+QToolButton#navRow { font-size: 12px; border-radius: 3px; padding: 0 8px; }
+QFrame#card[clickable="true"]:hover { background: #e8f4ff; border-color: #7da2ce; }
+
+/* Explorer-era proportions: glass frame, white working area, blue command band. */
+QLabel#aeroCaption {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(82,110,104,0.78),stop:0.5 rgba(22,47,43,0.82),stop:1 rgba(8,24,21,0.88));
+    border: 1px solid rgba(210,235,225,0.6);
+    color: #ffffff; font-family: "Segoe UI", "DejaVu Sans";
+    font-size: 12px; font-weight: 400;
+}
+QFrame#sidePanel {
+    background: #f1f5f1;
+    border: 1px solid #d6edff; border-radius: 5px;
+}
+QFrame#content {
+    background: #ffffff;
+    border: 1px solid #e6f6ff; border-radius: 5px;
+}
+QFrame#pageHeader {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #f5faf2,stop:0.5 #e6efdf,stop:1 #d4e2c9);
+    border-bottom: 1px solid #a3b69b;
+}
+QLabel[role="h1"] { font-size: 20px; font-weight: 400; color: #294625; }
+QFrame#card {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #ffffff,stop:1 #edf6fc);
+    border: 1px solid #d3dfea; border-radius: 3px;
+}
+QFrame#cardFlat { border: 1px solid #c0d8e9; border-radius: 4px; }
+QTreeWidget#sidebar { border-radius: 3px; }
+
+/* --- taskbar: the rail becomes a Windows Vista glass bar --- */
+QFrame#rail[chrome="taskbar"] {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #637575, stop:0.46 #334141, stop:0.50 #111b1b, stop:1 #1d2929);
+    border: 1px solid $taskbar_border;
+    border-radius: 3px;
+}
+QToolButton#railButton[chrome="taskbar"] {
+    color: #ffffff;
+    border-radius: 3px;
+    border: 1px solid transparent;
+}
+QToolButton#railButton[chrome="taskbar"]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.30), stop:1 rgba(255, 255, 255, 0.12));
+    border: 1px solid rgba(255, 255, 255, 0.45);
+}
+QToolButton#railButton[chrome="taskbar"]:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(176, 226, 255, 0.62), stop:1 rgba(92, 168, 226, 0.42));
+    border: 1px solid rgba(255, 255, 255, 0.80);
+}
+QToolButton#startOrb { background: transparent; border: none; }
+QWidget#railTray { background: transparent; }
+QLabel#trayStatus, QLabel#trayClock { color: #eefaff; font-size: 12px; }
+QFrame#railDivider { background: rgba(255, 255, 255, 0.28); border: none; }
+
+/* --- glossy buttons, like the 2009 control panel --- */
+QPushButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffffff, stop:0.48 #f0fbff, stop:0.52 #d6eefc, stop:1 #b6dff6);
+    border: 1px solid #8cc3e2;
+    border-radius: 3px;
+    padding: 4px 10px;
+}
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffffff, stop:0.48 #ffffff, stop:0.52 #e4f6ff, stop:1 #c8ebff);
+    border-color: #5aa8d8;
+}
+QPushButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #b6dff6, stop:0.5 #cfeafa, stop:1 #eaf8ff);
+}
+QPushButton:disabled {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(255, 255, 255, 0.70), stop:1 rgba(226, 240, 248, 0.70));
+    border-color: rgba(160, 194, 214, 0.60);
+    color: $muted;
+}
+QPushButton[variant="primary"] {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d8efc6, stop:0.45 #83b655, stop:0.55 #548c2e, stop:1 #33631b);
+    border: 1px solid #42682c;
+    color: #ffffff;
+    font-weight: 600;
+}
+QPushButton[variant="primary"]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #eff9e3, stop:0.45 #a8d97c, stop:0.55 #699e42, stop:1 #467a27);
+}
+QPushButton[variant="primary"]:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #0f5f9f, stop:0.5 #1f7dc4, stop:1 #3a9ede);
+}
+QPushButton[variant="primary"]:disabled {
+    background: rgba(255, 255, 255, 0.55);
+    border-color: rgba(150, 190, 215, 0.55);
+    color: $muted;
+}
+QPushButton[variant="ghost"] {
+    background: transparent;
+    border: 1px solid transparent;
+    color: $text_secondary;
+}
+QPushButton[variant="ghost"]:hover {
+    background: rgba(255, 255, 255, 0.70);
+    border-color: rgba(255, 255, 255, 0.95);
+    color: $text;
+}
+QPushButton[variant="subtle"] {
+    background: rgba(255, 255, 255, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    color: $text_secondary;
+}
+QPushButton[variant="danger"] {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffe9e6, stop:1 #f3c3bc);
+    border: 1px solid #d79a92;
+    color: $danger;
+}
+QPushButton[variant="danger"]:hover { background: #e8a9a2; color: #ffffff; }
+
+QToolButton:hover { background: rgba(255, 255, 255, 0.60); border-color: rgba(255, 255, 255, 0.90); }
+QToolButton:pressed { background: rgba(255, 255, 255, 0.85); }
+QToolButton:checked { background: rgba(255, 255, 255, 0.75); }
+
+/* --- inputs: white wells, blue focus ring --- */
+QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser, QComboBox, QSpinBox {
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid #9fcfe8;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QTextBrowser:focus,
+QComboBox:focus, QSpinBox:focus {
+    border: 1px solid #2f8fd0;
+    background: #ffffff;
+}
+QLineEdit#sidebarSearch {
+    border-radius: 12px;
+    padding: 7px 12px;
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid #a8d4ea;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #8cc3e2;
+    border-radius: 4px;
+}
+
+/* --- menus look like the 7 start menu --- */
+QMenu {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffffff, stop:1 #e6f5ff);
+    border: 1px solid #7fb9dd;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu::item { border-radius: 2px; padding: 5px 26px 5px 12px; }
+QMenu::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d8f1ff, stop:1 #a9dcf8);
+    color: $text;
+}
+QMenu::separator { background: #bcdcee; height: 1px; margin: 5px 8px; }
+QMenuBar { background: transparent; border: none; }
+
+/* --- tables and headers --- */
+QTableWidget, QTableView, QListWidget {
+    background: rgba(255, 255, 255, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    border-radius: 8px;
+}
+QHeaderView::section {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffffff, stop:1 #dceffb);
+    color: $text_secondary;
+    border-bottom: 1px solid #bcdcee;
+}
+QTableWidget::item:selected, QListWidget::item:selected {
+    background: rgba(160, 219, 250, 0.55);
+    color: $text;
+}
+QTableCornerButton::section { background: #eaf6fe; }
+
+/* --- the tree sits in a white well like the Explorer nav pane --- */
+QTreeWidget#sidebar {
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.90);
+    border-radius: 10px;
+    padding: 4px;
+}
+QTreeWidget#sidebar::item { color: $text_secondary; }
+QTreeWidget#sidebar::item:selected { color: $text; }
+
+/* --- status bar / log --- */
+QStatusBar { color: $muted; }
+QPlainTextEdit#log {
+    background: rgba(255, 255, 255, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    border-radius: 6px;
+}
+QToolTip {
+    background: #ffffff;
+    border: 1px solid #7fb9dd;
+    border-radius: 4px;
+    color: $text;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: rgba(120, 175, 210, 0.55);
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background: rgba(90, 150, 195, 0.75);
+}
+QProgressBar {
+    background: rgba(255, 255, 255, 0.80);
+    border: 1px solid #9fcfe8;
+    border-radius: 5px;
+}
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #a9e4ff, stop:1 #2f8fd0);
+    border-radius: 4px;
+}
+QCheckBox::indicator {
+    background: #ffffff;
+    border: 1px solid #9fcfe8;
+    border-radius: 3px;
+}
+QCheckBox::indicator:checked { background: #2f8fd0; border-color: #2f8fd0; }
+"""
 
 
 def stylesheet(theme: str) -> str:
     pal = palette(theme)
-    return STYLESHEET.substitute(vars(pal))
+    aero = Template(AERO_QSS).substitute(vars(pal)) if theme == "aero" else ""
+    return STYLESHEET.substitute(**vars(pal), aero=aero)

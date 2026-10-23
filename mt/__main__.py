@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"%(prog)s {config.APP_VERSION}")
     parser.add_argument("--db", metavar="PATH", help="использовать другую базу SQLite")
     parser.add_argument("--data-dir", metavar="DIR", help="каталог данных (вместо XDG)")
-    parser.add_argument("--theme", choices=("light", "dark", "system"), help="тема оформления")
+    parser.add_argument("--theme", choices=("light", "dark", "aero", "system"), help="тема оформления")
     parser.add_argument("--sync", metavar="SUBJECT_ID", type=int,
                         help="синхронизировать домашку (subject id) и выйти")
     parser.add_argument("--course", metavar="COURSE_ID", type=int,

@@ -137,6 +137,7 @@ class SyncThread(QThread):
         #: Recursive walk of everything that is already known.
         self.deep = bool(deep)
         self._stop = False
+        self._completed_subjects: set[int] = set()
 
     # ------------------------------------------------------------------ #
     def stop(self) -> None:
@@ -176,6 +177,8 @@ class SyncThread(QThread):
             if kind == "course":
                 result = self._sync_course(ident)
             else:
+                if ident in self._completed_subjects:
+                    continue
                 result = self._sync_subject(ident)
                 self.subject_done.emit(result)
             results.append(result)
@@ -190,15 +193,18 @@ class SyncThread(QThread):
     def _queue(self) -> list[tuple[str, int]]:
         """What to sync, in order.
 
-        An ordinary run syncs exactly what it was asked to.  A deep run takes
-        the whole known tree from the database: every course (the last added —
-        the biggest id — first), then the homeworks that no course reaches.
+        Ordinary runs include known homeworks of the requested courses as a
+        fallback. Deep runs take every course (largest id first) and all known
+        homeworks. Successfully completed homeworks are never fetched twice.
         """
         if not self.deep:
             queue: list[tuple[str, int]] = [
                 ("course", cid) for cid in self.course_ids
             ]
-            queue += [("subject", sid) for sid in self.subject_ids]
+            fallback = list(self.subject_ids)
+            for cid in self.course_ids:
+                fallback.extend(int(row["id"]) for row in db.course_homeworks(cid)["homeworks"])
+            queue += [("subject", sid) for sid in dict.fromkeys(fallback)]
             return queue
 
         course_ids = list(dict.fromkeys(self.course_ids))
@@ -207,10 +213,11 @@ class SyncThread(QThread):
         course_ids.sort(reverse=True)
 
         subject_ids = list(dict.fromkeys(self.subject_ids))
-        covered = db.course_subject_ids()
-        for row in db.list_subjects():
-            sid = int(row["id"])
-            if sid not in covered and sid not in subject_ids:
+        # A course can fail before discovering its homeworks. Never exclude
+        # known homework ids just because a navigation link already exists.
+        known = {int(row["id"]) for row in db.list_subjects()} | db.course_subject_ids()
+        for sid in sorted(known, reverse=True):
+            if sid not in subject_ids:
                 subject_ids.append(sid)
         return [("course", cid) for cid in course_ids] + [
             ("subject", sid) for sid in subject_ids
@@ -245,9 +252,8 @@ class SyncThread(QThread):
                 return result
             db.upsert_course(course_id, title, payload if isinstance(payload, dict) else {})
             # An incomplete list must not delete lessons that are still cached.
-            complete = failed_blocks == 0 and not self._stop
             db.replace_course_lessons(
-                course_id, [lesson.as_row() for lesson in lessons], prune=complete
+                course_id, [lesson.as_row() for lesson in lessons], prune=False
             )
             if failed_blocks:
                 result.errors += failed_blocks
@@ -258,15 +264,42 @@ class SyncThread(QThread):
             result.lessons = len(lessons)
             self.log.emit(f"  «{title}» · уроков: {len(lessons)}")
 
-            subject_ids: list[int] = []
-            subject_titles: dict[int, str] = {}
-            for position, lesson in enumerate(lessons):
+            cached_homeworks = db.course_homeworks(course_id)["homeworks"]
+            attempted: set[int] = set()
+
+            def sync_homework(subject_id: int, title_hint: str) -> bool:
+                if subject_id in self._completed_subjects or subject_id in attempted:
+                    return True
+                if self._stop:
+                    result.cancelled = True
+                    return False
+                attempted.add(subject_id)
+                sub = self._sync_subject(
+                    subject_id, report_progress=False, title_hint=title_hint
+                )
+                result.subjects += 1
+                result.kbs += sub.kbs
+                result.tests += sub.tests
+                result.errors += sub.errors
+                self.subject_done.emit(sub)
+                if sub.cancelled:
+                    result.cancelled = True
+                    return False
+                if sub.error:
+                    result.errors += 1
+                    if str(sub.error).startswith("auth"):
+                        result.error = sub.error
+                        return False
+                return True
+
+            for position, lesson in enumerate(reversed(lessons) if self.deep else lessons):
                 if self._stop:
                     result.cancelled = True
                     self.log.emit("  остановлено пользователем")
                     break
                 self.progress.emit(position, len(lessons) + 1, f"урок «{lesson.title}»")
                 try:
+                    self._pause()
                     structure = self.api.get_lesson_structure(course_id, lesson.id)
                     if db.course_title_is_generic(course_id):
                         # The list endpoint may omit the name; lesson items
@@ -276,12 +309,24 @@ class SyncThread(QThread):
                             db.set_course_title(course_id, module_title)
                             title = module_title
                     blocks = extract_practice_blocks(structure)
-                    db.set_lesson_subjects(lesson.id, [block.as_row() for block in blocks])
-                    for block in blocks:
-                        subject_titles.setdefault(block.subject_id, block.title)
-                        if block.subject_id not in subject_ids:
-                            subject_ids.append(block.subject_id)
+                    if blocks:
+                        # Incomplete navigation must not unlink saved tasks.
+                        old = db.lesson_homeworks(lesson.id)
+                        links = {
+                            int(row["id"]): {
+                                "subject_id": int(row["id"]),
+                                "title": row["title"], "position": row["position"],
+                            }
+                            for row in old
+                        }
+                        links.update({block.subject_id: block.as_row() for block in blocks})
+                        db.set_lesson_subjects(lesson.id, links.values())
                     self.log.emit(f"  ▸ {lesson.title}: домашек {len(blocks)}")
+                    # Persist tasks immediately, before discovering the next
+                    # lesson. Navigation alone is not a completed sync.
+                    for block in reversed(blocks) if self.deep else blocks:
+                        if not sync_homework(block.subject_id, block.title):
+                            return result
                 except AuthError:
                     raise
                 except ApiError as exc:
@@ -290,36 +335,15 @@ class SyncThread(QThread):
                 except Exception as exc:  # noqa: BLE001 - never kill the whole sync
                     result.errors += 1
                     self.log.emit(f"  ✗ урок «{lesson.title}»: {type(exc).__name__}: {exc}")
-                self._pause()
 
             if result.cancelled:
                 return result
 
-            total = len(lessons) + max(len(subject_ids), 1)
-            for position, subject_id in enumerate(subject_ids):
-                if self._stop:
-                    result.cancelled = True
-                    self.log.emit("  остановлено пользователем")
-                    break
-                self.progress.emit(
-                    len(lessons) + position, total, f"домашка #{subject_id}"
-                )
-                sub = self._sync_subject(
-                    subject_id,
-                    report_progress=False,
-                    title_hint=subject_titles.get(subject_id, ""),
-                )
-                result.subjects += 1
-                result.kbs += sub.kbs
-                result.tests += sub.tests
-                result.errors += sub.errors
-                self.subject_done.emit(sub)
-                if sub.error:
-                    result.errors += 1
-                    if str(sub.error).startswith("auth"):
-                        result.error = sub.error
-                        break
-                self._pause()
+            # Missing/failed navigation must not strand known homework ids.
+            for homework in reversed(cached_homeworks) if self.deep else cached_homeworks:
+                if not sync_homework(int(homework["id"]), str(homework["title"])):
+                    return result
+            total = len(lessons) + len(attempted)
             self.progress.emit(total, total, "готово")
         except AuthError as exc:
             result.error = f"auth: {exc}"
@@ -359,6 +383,7 @@ class SyncThread(QThread):
         # block tree.  A block is in both, so they cannot share one set.
         seen_nodes: set[int] = set()
         expanded: set[int] = set()
+        self._pause()
         first = self.api.get_education_group(course_id, per_page=page_size)
         nodes = course_nodes(first)
         seen_nodes.update(ident for ident in map(node_id, nodes) if ident is not None)
@@ -469,7 +494,17 @@ class SyncThread(QThread):
             self.log.emit(f"→ домашка #{subject_id}")
             if report_progress:
                 self.progress.emit(0, 1, f"домашка #{subject_id}")
-            base = self.api.get_curriculum_subject(subject_id)
+            try:
+                self._pause()
+                base = self.api.get_curriculum_subject(subject_id)
+            except AuthError:
+                raise
+            except ApiError as exc:
+                if not db.list_kbs(subject_id):
+                    raise
+                result.errors += 1
+                self.log.emit(f"  ✗ дерево домашки: {exc} — загружаю известные разделы")
+                base = {}
             title = subject_title(base, "")
             course_id = db.course_id_for_subject(subject_id)
             if course_id is not None and db.course_title_is_generic(course_id):
@@ -478,6 +513,14 @@ class SyncThread(QThread):
                     db.set_course_title(course_id, module_title)
                     self.log.emit(f"  предмет назван по courseTitleForModule: {module_title}")
             entries = [entry.as_row() for entry in extract_kbs_entries(base)]
+            # Navigation is only a way to discover ids; it must not prevent
+            # refreshing the actual tasks in already known sections.
+            discovered = {int(entry["id"]) for entry in entries}
+            entries.extend(
+                row for row in db.list_kbs(subject_id) if int(row["id"]) not in discovered
+            )
+            if self.deep:
+                entries.reverse()
             if not title and not entries:
                 # «Ошибки и пустые ответы НЕ кэшировать»: keep the previous data.
                 result.error = "сервер вернул пустую домашку"
@@ -489,11 +532,11 @@ class SyncThread(QThread):
                 cached = db.get_subject(subject_id) or {}
                 hint = title_hint or str(cached.get("title") or "")
                 title = hint if not db.title_is_generic(hint) else f"Домашка #{subject_id}"
-            db.upsert_subject(subject_id, title, base)
+            if base:
+                db.upsert_subject(subject_id, title, base)
             self.log.emit(f"  «{title}»")
             self.log.emit(f"  разделов в дереве: {len(entries)}")
             total = max(len(entries), 1)
-            seen_ids: list[int] = []
 
             for position, kbs in enumerate(entries):
                 if self._stop:
@@ -505,7 +548,6 @@ class SyncThread(QThread):
                     self.progress.emit(position, total, f"раздел #{kid}")
                 try:
                     count = self._sync_kbs(subject_id, kbs)
-                    seen_ids.append(kid)
                     result.kbs += 1
                     result.tests += count
                     self.log.emit(f"  ✓ раздел #{kid}: {count} {plural(count, 'тест', 'теста', 'тестов')}")
@@ -519,15 +561,13 @@ class SyncThread(QThread):
                     self.log.emit(f"  ✗ раздел #{kid}: {type(exc).__name__}: {exc}")
                 if report_progress:
                     self.progress.emit(position + 1, total, f"раздел #{kid}")
-                self._pause()
 
-            # Prune only when every section answered: a transient error must not
-            # delete a cached homework just because it was not fetched this time.
-            prunable = not result.cancelled and not result.errors and seen_ids
-            if prunable:
-                removed = db.prune_kbs(subject_id, seen_ids)
-                if removed:
-                    self.log.emit(f"  удалено устаревших разделов: {removed}")
+            # Do not prune sections from a shorter navigation response: the
+            # tasks are the archive, not disposable navigation data.
+            if not entries:
+                result.error = "не найдены разделы с заданиями"
+            elif not result.cancelled and not result.errors:
+                self._completed_subjects.add(subject_id)
             if report_progress:
                 self.progress.emit(total, total, "готово")
         except AuthError as exc:
@@ -560,6 +600,7 @@ class SyncThread(QThread):
             if self._stop:
                 raise RuntimeError("остановлено")
             try:
+                self._pause()
                 payload = self.api.get_kbs_tests(subject_id, kid, mode)
             except AuthError:
                 raise
@@ -571,24 +612,18 @@ class SyncThread(QThread):
                 self.log.emit(f"    режим {mode}: не массив тестов, пробую другой")
                 continue
 
-            db.upsert_kbs(kid, subject_id, mode, kbs.get("title"), kbs.get("lesson_id"))
             tests = _dedupe_tests(extract_tests(payload))
             rows = []
             for test in tests:
                 title = test.get("title") or test.get("name") or ""
                 rows.append((int(test["id"]), str(test.get("type") or ""), str(title), test))
-            if mode != preferred:
-                self.log.emit(f"    режим {preferred} недоступен, использован {mode}")
             if not rows:
-                # "Ошибки и пустые ответы НЕ кэшировать": keep what we already have.
-                cached = len(db.list_tests(kid))
-                if cached:
-                    self.log.emit(
-                        f"    пустой ответ ({mode}) — сохранён прежний кэш: {cached} тестов"
-                    )
-                else:
-                    self.log.emit(f"    пустой ответ ({mode}) — нечего кэшировать")
-                return 0
+                self.log.emit(f"    режим {mode}: заданий нет — пробую следующий")
+                last_error = ApiError(f"раздел #{kid}: сервер не вернул задания")
+                continue
+            db.upsert_kbs(kid, subject_id, mode, kbs.get("title"), kbs.get("lesson_id"))
+            if mode != preferred:
+                self.log.emit(f"    режим {preferred} пуст или недоступен, использован {mode}")
             # Merge, never replace: a shorter response must not delete tests
             # that are already cached (the library is meant to keep everything).
             total_cached = db.merge_kbs_tests(kid, subject_id, rows)

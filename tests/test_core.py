@@ -1349,7 +1349,7 @@ def test_sync_pauses_between_requests(temp_db, monkeypatch):
         thread.start()
         assert thread.wait(30_000)
 
-    assert len(drawn) == 2  # one pause per knowledge base of the fake homework
+    assert len(drawn) == 3  # before the homework tree and each of its two sections
     assert all(0.6 <= value <= 1.4 for value in drawn)
     assert len(set(drawn)) > 1  # randomized, not fixed
     # the worker sleeps in 100 ms slices, so cancellation stays responsive
@@ -1682,6 +1682,7 @@ def test_deep_sync_walks_every_course_last_first(temp_db, monkeypatch):
         assert db.get_lesson(lesson_id) is not None
     assert db.get_subject(777) is not None
     assert db.get_subject(900) is not None
+    assert db.overall_stats()["total"] == 8
 
 
 def test_deep_sync_pace_is_rarer_than_usual(monkeypatch):
@@ -1717,7 +1718,7 @@ def _block_api(monkeypatch, payload, structures):
             "tree": {"online": [{"id": 7000 + sid, "title": "Раздел"}], "offline": [], "aftertheory": []},
         },
     )
-    monkeypatch.setattr(api, "get_kbs_tests", lambda *a, **k: [])
+    monkeypatch.setattr(api, "get_kbs_tests", lambda *a, **k: [{"id": 12345, "type": "type1", "title": "Задание"}])
     return api
 
 
@@ -1814,3 +1815,131 @@ def test_lesson_items_filter_out_practice_blocks():
     )
     assert not models.is_lesson_item({"type": "curriculum_theory_block"})
     assert models.is_lesson_item({"id": 5})  # unknown shape: let the caller decide
+
+
+def test_course_sync_probes_past_empty_mode_and_persists_tasks(temp_db, monkeypatch):
+    """Syncing a course alone must save task payloads, not just navigation."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, KBS_ONLINE, TESTS_ONLINE, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-modes.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        original = api.get_kbs_tests
+        calls = []
+
+        def fetch(sid, kid, mode):
+            calls.append((kid, mode))
+            if kid == KBS_ONLINE:
+                return [] if mode == "online" else TESTS_ONLINE
+            return original(sid, kid, mode)
+
+        monkeypatch.setattr(api, "get_kbs_tests", fetch)
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        results = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+        assert results[0].errors == 0
+        assert (KBS_ONLINE, "online") in calls
+        assert (KBS_ONLINE, "offline") in calls
+        # Download the first lesson's tasks before requesting the next lesson.
+        paths = server.requests
+        homework_request = next(i for i, path in enumerate(paths) if "/curriculumsubject/777" in path)
+        next_lesson = next(i for i, path in enumerate(paths) if "/structures/41907129" in path)
+        assert homework_request < next_lesson
+    db.close()  # read from a fresh connection, not a UI or parser cache
+    assert len(db.list_tests(KBS_ONLINE)) == len(TESTS_ONLINE)
+    assert db.get_kbs(KBS_ONLINE)["mode"] == "offline"
+    assert db.get_test(1001)["payload_json"]
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_course_navigation_failure_still_fetches_linked_tasks(temp_db, monkeypatch, deep):
+    """Even a linked homework without a subjects row must enter the queue."""
+    from mt.api import Api, ApiError
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, KBS_ONLINE, LESSON_DB_ID, SUBJECT_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-fallback.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    db.upsert_course(COURSE_ID, "Предмет", {})
+    db.replace_course_lessons(COURSE_ID, [{"id": LESSON_DB_ID, "title": "Урок"}])
+    db.set_lesson_subjects(LESSON_DB_ID, [{"subject_id": SUBJECT_ID, "title": "Домашка"}])
+    assert db.get_subject(SUBJECT_ID) is None
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        def unavailable(*args, **kwargs):
+            raise ApiError("навигация временно недоступна")
+
+        monkeypatch.setattr(api, "get_education_group", unavailable)
+        thread = SyncThread(api, course_ids=[COURSE_ID], deep=deep)
+        results = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+    assert results[0].error  # failure is not hidden, but does not block tasks
+    assert len(db.list_tests(KBS_ONLINE)) == 5
+    assert any(result.subject_id == SUBJECT_ID and result.tests == 6 for result in results)
+
+
+@pytest.mark.parametrize("broken_tree", [False, True])
+def test_cached_sections_load_when_subject_navigation_fails(temp_db, monkeypatch, broken_tree):
+    from mt.api import Api, ApiError
+    from mt.sync import SyncThread
+    from tests.fake_server import KBS_ONLINE, SUBJECT_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-sections.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    db.upsert_subject(SUBJECT_ID, "Сохранённая домашка", {"saved": True})
+    db.upsert_kbs(KBS_ONLINE, SUBJECT_ID, "online", "Раздел", None)
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+
+        def unavailable(*args):
+            if broken_tree:
+                raise ApiError("дерево недоступно")
+            return {"title": "Сохранённая домашка", "tree": {}}
+
+        monkeypatch.setattr(api, "get_curriculum_subject", unavailable)
+        thread = SyncThread(api, [SUBJECT_ID])
+        results = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+    assert results[0].errors == int(broken_tree)
+    assert results[0].tests == 5
+    assert len(db.list_tests(KBS_ONLINE)) == 5
+    assert db.get_subject(SUBJECT_ID)["title"] == "Сохранённая домашка"
+
+
+def test_all_empty_modes_report_failure_without_mutating_section(temp_db, monkeypatch):
+    from mt.api import Api, ApiError
+    from mt.sync import SyncThread
+
+    db.upsert_subject(777, "Домашка", {})
+    db.upsert_kbs(501, 777, "offline", "Прежний раздел", 123)
+    before = db.get_kbs(501)
+    api = Api()
+    calls = []
+
+    def empty(sid, kid, mode):
+        calls.append(mode)
+        return []
+
+    monkeypatch.setattr(api, "get_kbs_tests", empty)
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    with pytest.raises(ApiError, match="не вернул задания"):
+        SyncThread(api)._sync_kbs(777, {"id": 501, "mode": "online"})
+    assert calls == ["online", "offline", "aftertheory"]
+    assert db.get_kbs(501) == before
