@@ -1332,8 +1332,8 @@ def test_sync_pauses_between_requests(temp_db, monkeypatch):
     slept: list[float] = []
     real_delay = config.sync_delay
 
-    def spy() -> float:
-        value = real_delay()
+    def spy(*, deep: bool = False) -> float:
+        value = real_delay(deep=deep)
         drawn.append(value)
         return value
 
@@ -1438,3 +1438,379 @@ def test_shorter_response_keeps_previously_cached_tests(temp_db, monkeypatch):
     assert db.kbs_stats(KBS_ONLINE)["total"] == len(TESTS_ONLINE)
     assert db.list_tests(KBS_ONLINE)[0]["id"] == TESTS_ONLINE[0]["id"]
     assert results[0].errors == 0
+
+
+# --------------------------------------------------------------------------- #
+# lessons_block courses (the shape some real courses answer with)
+# --------------------------------------------------------------------------- #
+def test_models_tell_a_lesson_block_from_a_lesson():
+    """A ``lessons_block`` has no entityInfo; its lessons live in /structures."""
+    payload = {
+        "data": [
+            {"id": 41892738, "title": "III семестр", "type": "lessons_block",
+             "sort": 1, "entityInfo": None, "children": None},
+            {"id": 41894018, "title": "Каникулы: Зима", "type": "lesson_entity",
+             "sort": 4, "entityInfo": {"id": 4771170, "title": "Каникулы", "type": "vacation"},
+             "children": None},
+        ],
+    }
+    nodes = models.course_nodes(payload)
+    assert [models.node_id(node) for node in nodes] == [41892738, 41894018]
+    assert not models.is_lesson_node(nodes[0])
+    assert models.is_lesson_node(nodes[1])
+
+    structure = {
+        "data": {
+            "id": 41892738, "title": "III семестр", "type": "lessons_block",
+            "entityInfo": None,
+            "children": [
+                {"id": 41892739, "title": "Занятие 1", "type": "lesson_entity",
+                 "entityInfo": {"id": 4771263, "title": "Занятие 1"}, "children": None},
+            ],
+        }
+    }
+    children = models.structure_children(structure)
+    assert [child["id"] for child in children] == [41892739]
+    assert models.is_lesson_node(children[0])
+    assert models.structure_node(structure)["title"] == "III семестр"
+    assert models.structure_children({"data": {"id": 1, "children": []}}) == []
+    assert models.structure_children(None) == []
+
+    # unknown shapes keep the old «treat it as a lesson» behaviour
+    assert models.is_lesson_node({"id": 5, "title": "Урок без entityInfo"})
+    assert models.is_rest_node(nodes[1])          # «Каникулы: Зима»
+    assert not models.is_rest_node(nodes[0])
+    assert not models.is_lesson_node({"id": 6, "type": "curriculum_module"})
+    assert models.is_lesson_node(None) is False
+
+
+def test_course_with_lessons_blocks_is_expanded(temp_db, monkeypatch):
+    """Lessons of a ``lessons_block`` are fetched from /structures, not lost."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import (
+        BLOCK_COURSE_ID,
+        BLOCK_DB_ID,
+        BLOCK_LESSON_DB_ID,
+        BLOCK_LESSON_ENTITY_ID,
+        BLOCK_SUBJECT_ID,
+        BLOCK_SUBJECT_TITLE,
+        VACATION_ID,
+        FakeServer,
+    )
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-block.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, course_ids=[BLOCK_COURSE_ID])
+        results: list = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+        paths = [path.split("?")[0] for path in server.requests]
+
+    assert results and results[0].error is None
+    assert results[0].errors == 0
+    assert db.get_course(BLOCK_COURSE_ID) is not None
+
+    lessons = db.course_homeworks(BLOCK_COURSE_ID)["lessons"]
+    ids = [int(lesson["id"]) for lesson, _homeworks in lessons]
+    assert ids == [BLOCK_LESSON_DB_ID]        # the lesson inside the block
+    assert BLOCK_DB_ID not in ids             # the block itself is not a lesson
+    assert VACATION_ID not in ids             # «Каникулы» is not a lesson
+    row = db.get_lesson(BLOCK_LESSON_DB_ID)
+    assert row["entity_lesson_id"] == BLOCK_LESSON_ENTITY_ID
+    assert row["title"] == "Занятие 1"
+
+    # the homework of that lesson was synced all the way down to its tests
+    assert db.get_subject(BLOCK_SUBJECT_ID)["title"] == BLOCK_SUBJECT_TITLE
+    assert db.homework_row(BLOCK_SUBJECT_ID)["total"] == 1
+
+    assert f"/api/v3/student/education-groups/{BLOCK_COURSE_ID}/structures/{BLOCK_DB_ID}" in paths
+    assert f"/api/v3/student/education-groups/{BLOCK_COURSE_ID}/structures/{BLOCK_LESSON_DB_ID}" in paths
+    # a vacation is skipped without even asking for its structure
+    assert f"/api/v3/student/education-groups/{BLOCK_COURSE_ID}/structures/{VACATION_ID}" not in paths
+
+
+def test_flat_course_is_parsed_without_block_requests(temp_db, monkeypatch):
+    """The block logic must not add requests to courses that list lessons."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import COURSE_ID, LESSON2_DB_ID, LESSON_DB_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-flat.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, course_ids=[COURSE_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+        structures = [
+            path.split("?")[0]
+            for path in server.requests
+            if "/structures/" in path
+        ]
+
+    assert structures == [
+        f"/api/v3/student/education-groups/{COURSE_ID}/structures/{LESSON_DB_ID}",
+        f"/api/v3/student/education-groups/{COURSE_ID}/structures/{LESSON2_DB_ID}",
+    ]
+
+
+def test_block_pagination_uses_the_node_id_as_cursor(temp_db, monkeypatch):
+    """``lastKnownId`` is the id of the *node*, never of a lesson inside it."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import BLOCK_COURSE_ID, BLOCK_DB_ID, BLOCK_LESSON_DB_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-cursor.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    monkeypatch.setattr(config, "COURSE_PAGE_SIZE", 1)
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, course_ids=[BLOCK_COURSE_ID])
+        thread.finished_all.connect(lambda _r: None, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+        page_urls = [
+            path for path in server.requests
+            if path.startswith(f"/api/v3/student/education-groups/{BLOCK_COURSE_ID}?")
+        ]
+
+    assert len(page_urls) >= 2, page_urls
+    assert f"lastKnownId={BLOCK_DB_ID}" in page_urls[1]
+    assert f"lastKnownId={BLOCK_LESSON_DB_ID}" not in " ".join(page_urls)
+    assert db.get_lesson(BLOCK_LESSON_DB_ID) is not None
+
+
+def test_failed_block_keeps_cached_lessons(temp_db, monkeypatch):
+    """A block that cannot be expanded must not delete the cached lessons."""
+    from mt.api import Api, ApiError
+    from mt.sync import SyncThread
+    from tests.fake_server import BLOCK_COURSE_ID, BLOCK_DB_ID, FakeServer
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-broken.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    db.upsert_course(BLOCK_COURSE_ID, "Английский язык", {})
+    db.replace_course_lessons(BLOCK_COURSE_ID, [
+        {"id": 555001, "entity_id": 666001, "title": "Старый урок", "position": 1, "payload": {}},
+    ])
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        original = api.get_lesson_structure
+
+        def broken(course_id: int, node_id: int):
+            if node_id == BLOCK_DB_ID:
+                raise ApiError("HTTP 500: boom", status=500)
+            return original(course_id, node_id)
+
+        monkeypatch.setattr(api, "get_lesson_structure", broken)
+        thread = SyncThread(api, course_ids=[BLOCK_COURSE_ID])
+        results: list = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(30_000)
+
+    assert results[0].errors >= 1
+    assert db.get_lesson(555001) is not None   # nothing was pruned
+    assert db.get_course(BLOCK_COURSE_ID)["title"] == "Английский язык"
+
+
+def test_deep_sync_walks_every_course_last_first(temp_db, monkeypatch):
+    """A recursive run takes the whole library, the last course first."""
+    from mt.api import Api
+    from mt.sync import SyncThread
+    from tests.fake_server import (
+        BLOCK_COURSE_ID,
+        BLOCK_LESSON_DB_ID,
+        COURSE_ID,
+        LESSON2_DB_ID,
+        LESSON_DB_ID,
+        FakeServer,
+    )
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-deep.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    db.upsert_course(COURSE_ID, "История России", {})
+    db.upsert_course(BLOCK_COURSE_ID, "Английский язык", {})
+
+    with FakeServer() as server:
+        monkeypatch.setattr(config, "BASE_URL", server.base_url)
+        api = Api()
+        api.set_cookies({"sessionid": "valid"})
+        thread = SyncThread(api, deep=True)
+        results: list = []
+        log: list[str] = []
+        thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+        thread.log.connect(log.append, type=Qt.ConnectionType.DirectConnection)
+        thread.start()
+        assert thread.wait(60_000)
+
+        course_pages = [
+            path for path in server.requests
+            if path.startswith("/api/v3/student/education-groups/")
+            and "/structures/" not in path
+        ]
+
+    assert results and results[0].error is None
+    assert any("глубокая синхронизация" in line for line in log)
+    # the biggest id is the course added last — it goes first
+    assert course_pages[0].startswith(f"/api/v3/student/education-groups/{COURSE_ID}")
+    assert any(str(BLOCK_COURSE_ID) in path for path in course_pages)
+
+    assert {int(row["id"]) for row in db.list_courses()} == {COURSE_ID, BLOCK_COURSE_ID}
+    for lesson_id in (LESSON_DB_ID, LESSON2_DB_ID, BLOCK_LESSON_DB_ID):
+        assert db.get_lesson(lesson_id) is not None
+    assert db.get_subject(777) is not None
+    assert db.get_subject(900) is not None
+
+
+def test_deep_sync_pace_is_rarer_than_usual(monkeypatch):
+    """The recursive walk sleeps longer; disabling pacing disables both."""
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.6, 1.4))
+    monkeypatch.setattr(config, "DEEP_SYNC_DELAY_RANGE", (0.9, 2.1))
+
+    usual = [config.sync_delay() for _ in range(100)]
+    deep = [config.sync_delay(deep=True) for _ in range(100)]
+    assert all(0.6 <= value <= 1.4 for value in usual)
+    assert all(0.9 <= value <= 2.1 for value in deep)
+    assert config.delay_range(deep=True) == (0.9, 2.1)
+    assert config.delay_range() == (0.6, 1.4)
+
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    assert config.sync_delay(deep=True) == 0.0
+
+
+def _block_api(monkeypatch, payload, structures):
+    """An Api whose course endpoints answer from dictionaries."""
+    from mt.api import Api
+
+    api = Api()
+    api.set_cookies({"sessionid": "valid"})
+    monkeypatch.setattr(api, "get_education_group", lambda *a, **k: payload)
+    monkeypatch.setattr(api, "get_lesson_structure", lambda _cid, nid: structures[nid])
+    monkeypatch.setattr(
+        api,
+        "get_curriculum_subject",
+        lambda sid: {
+            "id": sid,
+            "title": f"Домашка #{sid}",
+            "tree": {"online": [{"id": 7000 + sid, "title": "Раздел"}], "offline": [], "aftertheory": []},
+        },
+    )
+    monkeypatch.setattr(api, "get_kbs_tests", lambda *a, **k: [])
+    return api
+
+
+def test_nested_blocks_are_expanded_recursively(temp_db, monkeypatch):
+    """A block may contain another block — the walk keeps going down."""
+    from mt.sync import SyncThread
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-nested.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+
+    payload = {
+        "title": "Курс",
+        "data": [
+            {"id": 1, "type": "lessons_block", "title": "Уровень 1",
+             "entityInfo": None, "children": None},
+        ],
+    }
+    structures = {
+        1: {"data": {"id": 1, "type": "lessons_block", "children": [
+            {"id": 2, "type": "lessons_block", "title": "Уровень 2",
+             "entityInfo": None, "children": None},
+            {"id": 3, "type": "lesson_entity", "title": "Первый урок",
+             "entityInfo": {"id": 30, "title": "Первый урок"}, "children": None},
+        ]}},
+        2: {"data": {"id": 2, "type": "lessons_block", "children": [
+            {"id": 4, "type": "lesson_entity", "title": "Вложенный урок",
+             "entityInfo": {"id": 40, "title": "Вложенный урок"}, "children": None},
+        ]}},
+        3: {"data": {"id": 3, "children": [
+            {"type": "curriculum_practice_block", "entityInfo": {"id": 700, "title": "Домашка A"}},
+        ]}},
+        4: {"data": {"id": 4, "children": [
+            {"type": "curriculum_practice_block", "entityInfo": {"id": 800, "title": "Домашка B"}},
+        ]}},
+    }
+    api = _block_api(monkeypatch, payload, structures)
+
+    thread = SyncThread(api, course_ids=[555])
+    results: list = []
+    thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+    thread.start()
+    assert thread.wait(30_000)
+
+    assert results[0].errors == 0
+    lessons = db.course_homeworks(555)["lessons"]
+    # the order of the children is kept: the nested block comes first
+    assert [int(lesson["id"]) for lesson, _ in lessons] == [4, 3]
+    assert [lesson["position"] for lesson, _ in lessons] == [0, 1]
+    assert db.homework_row(700) is not None
+    assert db.homework_row(800) is not None
+
+
+def test_block_nesting_stops_at_the_depth_limit(temp_db, monkeypatch):
+    """A malformed chain of blocks stops safely and reports an error."""
+    from mt.sync import SyncThread
+
+    monkeypatch.setattr(config, "COOKIES_PATH", config.DATA_DIR / "cookies-depth.json")
+    monkeypatch.setattr(config, "SYNC_DELAY_RANGE", (0.0, 0.0))
+    monkeypatch.setattr(config, "COURSE_STRUCTURE_DEPTH", 1)
+
+    payload = {"title": "Курс", "data": [
+        {"id": 1, "type": "lessons_block", "title": "Блок 1", "entityInfo": None, "children": None},
+    ]}
+    structures = {
+        1: {"data": {"id": 1, "children": [
+            {"id": 2, "type": "lessons_block", "title": "Блок 2", "entityInfo": None, "children": None},
+        ]}},
+        2: {"data": {"id": 2, "children": []}},
+    }
+    api = _block_api(monkeypatch, payload, structures)
+
+    db.upsert_course(555, "Курс", {})
+    db.replace_course_lessons(555, [
+        {"id": 9001, "entity_id": 9002, "title": "Старый урок", "position": 1, "payload": {}},
+    ])
+
+    thread = SyncThread(api, course_ids=[555])
+    results: list = []
+    thread.finished_all.connect(results.extend, type=Qt.ConnectionType.DirectConnection)
+    thread.start()
+    assert thread.wait(30_000)
+
+    assert results[0].errors == 1
+    # nothing was pruned by the incomplete walk
+    assert db.get_lesson(9001) is not None
+
+
+def test_lesson_items_filter_out_practice_blocks():
+    """Expanding a block must never treat theory/practice as a lesson."""
+    assert models.is_lesson_item({"type": "lesson_entity", "entityInfo": {"id": 1}})
+    assert models.is_lesson_item({"type": "lessons_block"})
+    assert not models.is_lesson_item(
+        {"type": "curriculum_practice_block", "entityInfo": {"id": 777}}
+    )
+    assert not models.is_lesson_item({"type": "curriculum_theory_block"})
+    assert models.is_lesson_item({"id": 5})  # unknown shape: let the caller decide

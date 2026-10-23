@@ -608,8 +608,15 @@ def course_stats(cid: int) -> dict[str, int]:
     }
 
 
-def replace_course_lessons(course_id: int, lessons: Iterable[dict[str, Any]]) -> int:
-    """Store the lessons of a course; lessons missing from *lessons* vanish."""
+def replace_course_lessons(
+    course_id: int, lessons: Iterable[dict[str, Any]], *, prune: bool = True
+) -> int:
+    """Store the lessons of a course; lessons missing from *lessons* vanish.
+
+    ``prune=False`` keeps lessons that this run did not see.  The sync uses it
+    when part of the course could not be read (a failed block or a cancelled
+    run), so a transient error never deletes cached lessons.
+    """
     stamp = now()
     values = []
     keep: set[int] = set()
@@ -634,7 +641,7 @@ def replace_course_lessons(course_id: int, lessons: Iterable[dict[str, Any]]) ->
                 "SELECT id FROM lessons WHERE course_id = ?", (course_id,)
             ).fetchall()
         }
-        for stale in existing - keep:
+        for stale in (existing - keep) if prune else set():
             conn.execute("DELETE FROM lesson_subjects WHERE lesson_id = ?", (stale,))
             conn.execute(
                 "DELETE FROM lessons WHERE course_id = ? AND id = ?", (course_id, stale)

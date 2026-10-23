@@ -11,12 +11,22 @@ Two entry points share one queue:
 * a **subject** is synchronised directly, as before.
 
 Both can be mixed in a single run; the UI shows one summary at the end.
+
+A course may answer with ``lessons_block`` nodes («III семестр») whose
+``children`` are ``null`` — those are expanded through ``/structures/<id>``
+before the recursion continues into lessons.  Courses that list lessons
+directly are parsed exactly as before: the block path is only taken when the
+node really has no ``entityInfo`` of its own.
+
+``deep=True`` turns the run into a recursive walk of the whole library: every
+course (the last one first), every lesson, every homework and every section, at
+a deliberately rarer pace.  It always merges, never drops data.
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -24,13 +34,21 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from . import config, db
 from .api import Api, ApiError, AuthError
 from .models import (
+    LessonEntry,
+    course_nodes,
     extract_course_title,
     extract_kbs_entries,
     extract_lessons,
     extract_practice_blocks,
     extract_tests,
     find_course_title,
+    is_lesson_item,
+    is_lesson_node,
+    is_rest_node,
+    node_id,
     plural,
+    structure_children,
+    structure_node,
     subject_title,
 )
 
@@ -63,6 +81,19 @@ def _dedupe_tests(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(unique.values())
 
 
+def _renumber_lessons(lessons: list[LessonEntry]) -> list[LessonEntry]:
+    """Give lessons a stable display order.
+
+    Lessons carry their own ``sort``; children of a ``lessons_block`` may repeat
+    it or omit it.  When positions collide, the order of the walk wins — it is
+    the order the site shows, top to bottom.
+    """
+    positions = [lesson.position for lesson in lessons]
+    if len(set(positions)) == len(positions):
+        return lessons
+    return [replace(lesson, position=index) for index, lesson in enumerate(lessons)]
+
+
 @dataclass
 class SyncResult:
     subject_id: int = 0
@@ -93,6 +124,8 @@ class SyncThread(QThread):
         subject_ids: list[int] | None = None,
         course_ids: list[int] | None = None,
         parent=None,
+        *,
+        deep: bool = False,
     ) -> None:
         if parent is None and isinstance(course_ids, QObject):
             # Backwards compatibility: SyncThread(api, subject_ids, parent).
@@ -101,6 +134,8 @@ class SyncThread(QThread):
         self.api = api
         self.subject_ids = list(subject_ids or [])
         self.course_ids = list(course_ids or [])
+        #: Recursive walk of everything that is already known.
+        self.deep = bool(deep)
         self._stop = False
 
     # ------------------------------------------------------------------ #
@@ -113,7 +148,7 @@ class SyncThread(QThread):
         The delay is re-drawn for every request, so a long sync never looks like
         a fixed-rate bot.  Cancellation is honoured in 100 ms slices.
         """
-        remaining = config.sync_delay()
+        remaining = config.sync_delay(deep=self.deep)
         if remaining <= 0:
             return
         while remaining > 0 and not self._stop:
@@ -123,15 +158,21 @@ class SyncThread(QThread):
 
     # ------------------------------------------------------------------ #
     def run(self) -> None:  # noqa: D401 - Qt entry point
-        low, high = config.SYNC_DELAY_RANGE
+        low, high = config.delay_range(self.deep)
         if high > 0:
             self.log.emit(f"— пауза между запросами: {low:.1f}–{high:.1f} с (случайная)")
+        if self.deep:
+            self.log.emit(
+                "— глубокая синхронизация: предмет → урок → домашка → раздел,"
+                " от последнего предмета"
+            )
         results: list[SyncResult] = []
-        queue: list[tuple[str, int]] = [("course", cid) for cid in self.course_ids]
-        queue += [("subject", sid) for sid in self.subject_ids]
-        for kind, ident in queue:
+        queue = self._queue()
+        for position, (kind, ident) in enumerate(queue, start=1):
             if self._stop:
                 break
+            if self.deep and len(queue) > 1:
+                self.log.emit(f"— {position} из {len(queue)}")
             if kind == "course":
                 result = self._sync_course(ident)
             else:
@@ -146,6 +187,35 @@ class SyncThread(QThread):
         db.repair_course_titles()
         self.finished_all.emit(results)
 
+    def _queue(self) -> list[tuple[str, int]]:
+        """What to sync, in order.
+
+        An ordinary run syncs exactly what it was asked to.  A deep run takes
+        the whole known tree from the database: every course (the last added —
+        the biggest id — first), then the homeworks that no course reaches.
+        """
+        if not self.deep:
+            queue: list[tuple[str, int]] = [
+                ("course", cid) for cid in self.course_ids
+            ]
+            queue += [("subject", sid) for sid in self.subject_ids]
+            return queue
+
+        course_ids = list(dict.fromkeys(self.course_ids))
+        if not course_ids:
+            course_ids = [int(row["id"]) for row in db.list_courses()]
+        course_ids.sort(reverse=True)
+
+        subject_ids = list(dict.fromkeys(self.subject_ids))
+        covered = db.course_subject_ids()
+        for row in db.list_subjects():
+            sid = int(row["id"])
+            if sid not in covered and sid not in subject_ids:
+                subject_ids.append(sid)
+        return [("course", cid) for cid in course_ids] + [
+            ("subject", sid) for sid in subject_ids
+        ]
+
     # ------------------------------------------------------------------ #
     def _sync_course(self, course_id: int) -> SyncResult:
         """Course → lessons → practice blocks → subjects → tests."""
@@ -154,7 +224,7 @@ class SyncThread(QThread):
         try:
             self.log.emit(f"→ предмет #{course_id}")
             self.progress.emit(0, 1, f"предмет #{course_id}")
-            payload, lessons = self._fetch_course(course_id)
+            payload, lessons, failed_blocks = self._fetch_course(course_id)
             title = extract_course_title(payload, "")
             if not title:
                 # The payload may omit the name (or send only a number):
@@ -166,11 +236,25 @@ class SyncThread(QThread):
                     title = f"Предмет #{course_id}"
             if not lessons:
                 # «Ошибки и пустые ответы НЕ кэшировать».
-                result.error = "сервер вернул предмет без уроков"
+                result.errors += failed_blocks
+                result.error = (
+                    "не удалось прочитать уроки предмета" if failed_blocks
+                    else "сервер вернул предмет без уроков"
+                )
                 self.log.emit("  пустой ответ — кэш предмета не изменён")
                 return result
             db.upsert_course(course_id, title, payload if isinstance(payload, dict) else {})
-            db.replace_course_lessons(course_id, [lesson.as_row() for lesson in lessons])
+            # An incomplete list must not delete lessons that are still cached.
+            complete = failed_blocks == 0 and not self._stop
+            db.replace_course_lessons(
+                course_id, [lesson.as_row() for lesson in lessons], prune=complete
+            )
+            if failed_blocks:
+                result.errors += failed_blocks
+                self.log.emit(
+                    f"  не удалось раскрыть блоков: {failed_blocks}"
+                    " — прежние уроки сохранены"
+                )
             result.lessons = len(lessons)
             self.log.emit(f"  «{title}» · уроков: {len(lessons)}")
 
@@ -252,30 +336,128 @@ class SyncThread(QThread):
         return result
 
     # ------------------------------------------------------------------ #
-    def _fetch_course(self, course_id: int) -> tuple[Any, list]:
+    def _fetch_course(self, course_id: int) -> tuple[Any, list[LessonEntry], int]:
         """All lessons of a course, following ``lastKnownId`` pagination.
 
         The backend ignores ``page``; the cursor is the ``id`` of the last
-        lesson already seen.  A page that brings nothing new ends the course.
+        **node** already seen (a ``lessons_block`` counts too, not only a
+        lesson).  A page that brings nothing new ends the course.
+
+        Some courses answer with ``lessons_block`` nodes («III семестр») whose
+        ``children`` are ``null``: those are expanded through
+        ``/structures/<id>``.  Nodes that already carry ``entityInfo`` are used
+        as lessons without any extra request, so ordinary courses are parsed
+        exactly as before.
+
+        The third value counts blocks that could not be expanded.  The caller
+        must then merge instead of replace (and report the error), so a failed
+        request never deletes lessons that are already cached.
         """
         page_size = config.COURSE_PAGE_SIZE
+        state = {"failed": 0}
+        # Pagination dedupes by node id; expansion guards against cycles in the
+        # block tree.  A block is in both, so they cannot share one set.
+        seen_nodes: set[int] = set()
+        expanded: set[int] = set()
         first = self.api.get_education_group(course_id, per_page=page_size)
-        batch = extract_lessons(first)
-        lessons = list(batch)
+        nodes = course_nodes(first)
+        seen_nodes.update(ident for ident in map(node_id, nodes) if ident is not None)
+        lessons = self._lessons_from_nodes(course_id, nodes, state, expanded)
         requests = 1
-        while batch and not self._stop:
+        while nodes and not self._stop:
             if requests >= config.COURSE_MAX_PAGES:
                 self.log.emit(f"  остановлено после {requests} страниц (лимит)")
                 break
+            cursor = node_id(nodes[-1])
+            if cursor is None:
+                break
             self._pause()
             payload = self.api.get_education_group(
-                course_id, last_known_id=batch[-1].id, per_page=page_size
+                course_id, last_known_id=cursor, per_page=page_size
             )
             requests += 1
-            known = {lesson.id for lesson in lessons}
-            batch = [lesson for lesson in extract_lessons(payload) if lesson.id not in known]
-            lessons.extend(batch)
-        return first, lessons
+            fresh = [
+                node for node in course_nodes(payload) if node_id(node) not in seen_nodes
+            ]
+            if not fresh:
+                break
+            seen_nodes.update(ident for ident in map(node_id, fresh) if ident is not None)
+            nodes = fresh
+            lessons.extend(self._lessons_from_nodes(course_id, nodes, state, expanded))
+        if self._stop and not state["failed"]:
+            state["failed"] = 1  # cancelled: keep the cached lessons too
+        return first, _renumber_lessons(lessons), state["failed"]
+
+    def _lessons_from_nodes(
+        self,
+        course_id: int,
+        nodes: list[dict[str, Any]],
+        state: dict[str, int],
+        seen: set[int],
+    ) -> list[LessonEntry]:
+        """Lessons of these education-group nodes, blocks expanded recursively."""
+        lessons: list[LessonEntry] = []
+        for node in nodes:
+            lessons.extend(self._lessons_of_node(course_id, node, state, seen, depth=0))
+        return lessons
+
+    def _lessons_of_node(
+        self,
+        course_id: int,
+        node: dict[str, Any],
+        state: dict[str, int],
+        seen: set[int],
+        *,
+        depth: int,
+    ) -> list[LessonEntry]:
+        """A node is either a lesson (use it) or a block (expand its children)."""
+        if is_rest_node(node):
+            # «Каникулы: Зима» is a pause in the schedule, not a lesson: it has
+            # no homeworks and would only add an empty row plus a request.
+            return []
+        if is_lesson_node(node):
+            return extract_lessons([node])
+
+        ident = node_id(node)
+        title = str(node.get("title") or f"блок #{ident}")
+        if ident is None:
+            return []
+        if depth >= config.COURSE_STRUCTURE_DEPTH:
+            state["failed"] += 1
+            self.log.emit(f"  ✗ блок «{title}»: вложенность глубже {config.COURSE_STRUCTURE_DEPTH}")
+            return []
+        if ident in seen:
+            return []
+        seen.add(ident)
+
+        self.log.emit(f"  ▸ блок «{title}» — раскрываю структуру #{ident}")
+        try:
+            self._pause()
+            payload = self.api.get_lesson_structure(course_id, ident)
+        except AuthError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad block must not kill the course
+            state["failed"] += 1
+            self.log.emit(f"  ✗ блок «{title}»: {exc}")
+            return []
+
+        # Only lessons and nested blocks: a lesson structure also lists its
+        # theory/practice blocks, and those are not lessons.
+        children = [
+            child for child in structure_children(payload) if is_lesson_item(child)
+        ]
+        if not children:
+            # The node may still be a lesson whose entity only shows up here.
+            data = structure_node(payload)
+            if is_lesson_node(data):
+                return extract_lessons([data])
+            self.log.emit(f"  блок «{title}»: уроков нет")
+            return []
+        return [
+            lesson
+            for child in children
+            for lesson in self._lessons_of_node(course_id, child, state, seen, depth=depth + 1)
+        ]
 
     # ------------------------------------------------------------------ #
     def _sync_subject(
