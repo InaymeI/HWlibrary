@@ -788,3 +788,71 @@ def test_one_course_sync_populates_homework_tasks_without_manual_sync(app, windo
     assert window.homework_page.chip_count() == 1
     db.close()
     assert db.get_test(1001)["payload_json"]
+
+
+def test_lesson_batch_requires_confirmation_and_does_not_send_on_open(app, window, monkeypatch):
+    from PyQt6.QtWidgets import QPushButton
+
+    from mt.ui.batch_dialog import LessonSendDialog
+    from tests.fake_server import LESSON_DB_ID
+
+    _subscribe_course(app, window)
+    calls = []
+
+    def post(*args):
+        calls.append(args)
+        return {"result": "true", "percent": 100}
+
+    monkeypatch.setattr(window.api, "post_answer", post)
+    window.navigate(f"lesson:{LESSON_DB_ID}")
+    app.processEvents()
+    assert window.lesson_page.findChild(QPushButton, "sendLessonAnswers") is not None
+    dialog = LessonSendDialog(window.api, LESSON_DB_ID, window)
+    dialog.show()
+    app.processEvents()
+    assert not calls
+    assert not dialog.send.isEnabled()
+    dialog.confirm.setChecked(True)
+    assert dialog.send.isEnabled()
+    dialog.send.click()
+    assert dialog.worker.wait(30_000)
+    app.processEvents()
+    assert len(calls) == len(dialog.plan) == 5
+    assert not dialog.send.isEnabled()  # no accidental duplicate batch
+    assert "Обработано: 5" in dialog.log.toPlainText()
+    dialog.close()
+
+
+def test_closing_main_window_during_lesson_batch_stops_safely(app, window, monkeypatch):
+    import threading
+
+    from mt.ui.batch_dialog import LessonSendDialog
+    from tests.fake_server import LESSON_DB_ID
+
+    _subscribe_course(app, window)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def post(*args):
+        calls.append(args)
+        entered.set()
+        release.wait(5)
+        return {"result": "true"}
+
+    monkeypatch.setattr(window.api, "post_answer", post)
+    dialog = LessonSendDialog(window.api, LESSON_DB_ID, window)
+    window._lesson_send_dialog = dialog
+    dialog.confirm.setChecked(True)
+    dialog.send.click()
+    try:
+        assert entered.wait(3)
+        window.close()
+        assert window.isVisible()
+        assert dialog.worker.isInterruptionRequested()
+    finally:
+        release.set()
+        assert dialog.worker.wait(10_000)
+        app.processEvents()
+        dialog.close()
+        window._lesson_send_dialog = None
+    assert len(calls) == 1

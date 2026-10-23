@@ -835,6 +835,9 @@ class LessonPage(ScrollPage):
         )
         sync_button = primary_button("Синхронизировать", "refresh")
         sync_button.clicked.connect(lambda: self.main.sync_lesson(self.lesson_id))
+        send_lesson = secondary_button("Отправить ответы за урок", "send")
+        send_lesson.setObjectName("sendLessonAnswers")
+        send_lesson.clicked.connect(lambda: self.main.send_lesson_answers(self.lesson_id))
         open_course = secondary_button("К предмету", "book")
         open_course.clicked.connect(
             lambda: self.navigate.emit(f"course:{lesson['course_id']}")
@@ -857,7 +860,7 @@ class LessonPage(ScrollPage):
                  f"course:{lesson['course_id']}"),
                 (title, None),
             ],
-            actions=[sync_button, open_course],
+            actions=[sync_button, send_lesson, open_course],
         )
 
         if meta.topics:

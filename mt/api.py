@@ -1,7 +1,6 @@
 """Thin HTTP client for education.maximumtest.ru.
 
-* Thread safe: the requests session is guarded by a lock and a separate
-  session is used per thread (``requests.Session`` is not thread safe).
+* Thread safe: a shared requests session is guarded by a re-entrant lock.
 * Transparent retries for idempotent GETs (network hiccups, 5xx, 429).
 * Friendly, translatable errors (:class:`AuthError`, :class:`NetworkError`).
 * Cookie jar persisted with ``0600`` permissions instead of the default umask.
@@ -15,6 +14,7 @@ import os
 import threading
 import time
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -35,6 +35,10 @@ class ApiError(RuntimeError):
 
 class AuthError(ApiError):
     title = "Нужна авторизация"
+
+
+class AccessDeniedError(ApiError):
+    title = "Доступ запрещён"
 
 
 class NetworkError(ApiError):
@@ -93,9 +97,6 @@ class Api:
     def _apply_cookies(self) -> None:
         with self._lock:
             self._session.cookies.clear()
-            self._session.cookies.update(
-                requests.utils.cookiejar_from_dict(dict(self._cookies))
-            )
 
     def _load_cookies(self) -> None:
         if not config.COOKIES_PATH.exists():
@@ -144,15 +145,14 @@ class Api:
         cookies = self.parse_cookie_string(raw)
         if not cookies:
             raise ApiError("Не удалось разобрать cookies: ожидается «name=value; …»")
-        self._cookies.update(cookies)
-        self._apply_cookies()
-        self.save_cookies()
+        self.set_cookies(cookies)
         return len(cookies)
 
     def set_cookies(self, cookies: dict[str, str]) -> None:
-        self._cookies = {str(k): str(v) for k, v in cookies.items()}
-        self._apply_cookies()
-        self.save_cookies()
+        with self._lock:
+            self._cookies = {str(k): str(v) for k, v in cookies.items()}
+            self._apply_cookies()
+            self.save_cookies()
 
     def clear_cookies(self) -> None:
         self._cookies = {}
@@ -211,56 +211,80 @@ class Api:
         params: dict[str, Any] | None = None,
     ) -> Any:
         url = config.BASE_URL + path
-        headers = {}
-        if self._cookies:
-            # Explicit header: survives per-thread sessions and redirects.
-            headers["Cookie"] = self.cookie_header
+        origin = urlsplit(config.BASE_URL)
+        context = f"{method} {urlsplit(url).path}"
         try:
             with self._lock:
-                response = self._session.request(
-                    method,
-                    url,
-                    json=payload,
-                    params=params,
-                    headers=headers,
-                    timeout=config.REQUEST_TIMEOUT,
-                    allow_redirects=True,
-                )
+                for hop in range(6):
+                    # No domainless cookie jar: redirects can otherwise combine
+                    # an imported token with a rotated token of the same name.
+                    self._session.cookies.clear()
+                    response = self._session.request(
+                        method, url, json=payload, params=params,
+                        headers={"Cookie": self.cookie_header} if self._cookies else {},
+                        timeout=config.REQUEST_TIMEOUT, allow_redirects=False,
+                    )
+                    is_redirect = response.status_code in (301, 302, 303, 307, 308)
+                    is_json = "json" in response.headers.get("Content-Type", "").lower()
+                    if response.status_code < 400 and (is_redirect or is_json):
+                        self._absorb_cookies(response)
+                    if response.status_code not in (301, 302, 303, 307, 308):
+                        break
+                    target = urljoin(url, response.headers.get("Location", ""))
+                    parsed = urlsplit(target)
+                    if (parsed.scheme, parsed.netloc) != (origin.scheme, origin.netloc):
+                        raise AuthError(f"{context}: HTTP {response.status_code}, "
+                                        "редирект на другой сайт; cookies не переданы")
+                    if method != "GET" or not response.headers.get("Location"):
+                        raise ApiError(f"{context}: HTTP {response.status_code}, "
+                                       "неожиданный редирект; запрос не повторён")
+                    if hop == 5:
+                        raise ApiError(f"{context}: слишком много перенаправлений")
+                    response.close()
+                    url, params = target, None
+                # Clear Set-Cookie duplicates; the canonical imported/rotated
+                # header is constructed afresh for each request.
+                self._session.cookies.clear()
         except requests.Timeout as exc:
-            raise NetworkError("Сервер не ответил вовремя — проверьте соединение") from exc
+            raise NetworkError(f"{context}: сервер не ответил вовремя") from exc
         except requests.RequestException as exc:
-            raise NetworkError(f"Не удалось подключиться: {exc.__class__.__name__}") from exc
-
-        self._absorb_cookies(response)
+            raise NetworkError(f"{context}: {exc.__class__.__name__}") from exc
 
         status = response.status_code
-        if status in (401, 403):
+        if status == 401:
             raise AuthError(
-                "Сессия недействительна или истекла. Импортируйте cookies заново.",
+                f"{context}: HTTP 401 — сервер не принял cookies. "
+                "Это ответ сервера, а не проверка срока сессии приложением.",
                 status=status,
             )
+        if status == 403:
+            raise AccessDeniedError(
+                f"{context}: HTTP 403 — сервер запретил доступ к этому ресурсу. "
+                "Это не обязательно истёкшая сессия.", status=status,
+            )
         if status == 429:
-            raise RateLimitError("Сервер ограничил частоту запросов. Попробуйте позже.", status=status)
+            raise RateLimitError(f"{context}: HTTP 429 — сервер ограничил частоту запросов.", status=status)
         if status >= 400:
-            snippet = response.text[:200].strip().replace("\n", " ")
-            raise ApiError(f"HTTP {status}: {snippet or response.reason}", status=status)
+            raise ApiError(f"{context}: HTTP {status}", status=status)
 
         content_type = response.headers.get("Content-Type", "")
         if "json" not in content_type.lower():
             # Usually an HTML login page served with 200 OK.
             if "text/html" in content_type.lower():
-                raise AuthError("Сервер вернул страницу входа вместо данных — нужна авторизация.")
+                raise ApiError(f"{context}: HTTP {status}, HTML вместо JSON. "
+                               "Это может быть страница входа или защитный фильтр; "
+                               "cookies не изменены.", status=status)
             raise ApiError(f"Неожиданный ответ сервера ({content_type or 'без типа'})")
         try:
             return response.json()
         except ValueError as exc:
-            raise ApiError("Сервер вернул некорректный JSON") from exc
+            raise ApiError(f"{context}: HTTP {status}, некорректный JSON") from exc
 
     def _absorb_cookies(self, response: requests.Response) -> None:
         """Persist cookies the server rotates during requests."""
         changed = False
         for cookie in getattr(response, "cookies", []) or []:
-            if not cookie.name:
+            if not cookie.name or not cookie.value:
                 continue
             if self._cookies.get(cookie.name) != cookie.value:
                 self._cookies[cookie.name] = cookie.value
